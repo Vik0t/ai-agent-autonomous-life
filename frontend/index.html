@@ -1,463 +1,1173 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cyber Hackathon - Virtual World Simulator</title>
-    <script src="https://unpkg.com/react@17/umd/react.development.js"></script>
-    <script src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+    <title>КИБЕР РЫВОК — Симулятор AI-Агентов</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <style>
-        body {
-            font-family: Arial, sans-serif;
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Rajdhani:wght@300;500;700&display=swap');
+        
+        * {
             margin: 0;
-            padding: 20px;
-            background-color: #f0f0f0;
+            padding: 0;
+            box-sizing: border-box;
         }
+        
+        :root {
+            --neon-cyan: #00f0ff;
+            --neon-pink: #ff00ff;
+            --neon-purple: #b829dd;
+            --neon-green: #00ff88;
+            --neon-red: #ff0040;
+            --neon-yellow: #ffee00;
+            --dark-bg: #0a0a0f;
+            --panel-bg: rgba(10, 10, 15, 0.85);
+            --grid-color: rgba(0, 240, 255, 0.1);
+        }
+        
+        body {
+            font-family: 'Rajdhani', sans-serif;
+            background: var(--dark-bg);
+            color: #fff;
+            min-height: 100vh;
+            overflow-x: hidden;
+            background-image: 
+                linear-gradient(var(--grid-color) 1px, transparent 1px),
+                linear-gradient(90deg, var(--grid-color) 1px, transparent 1px);
+            background-size: 50px 50px;
+        }
+        
+        .cyber-grid {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            background: 
+                radial-gradient(circle at 20% 50%, rgba(0, 240, 255, 0.05) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(255, 0, 255, 0.05) 0%, transparent 50%),
+                radial-gradient(circle at 40% 20%, rgba(184, 41, 221, 0.05) 0%, transparent 50%);
+            z-index: -1;
+        }
+        
+        .scan-line {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--neon-cyan), transparent);
+            animation: scan 8s linear infinite;
+            opacity: 0.3;
+            pointer-events: none;
+            z-index: 1000;
+        }
+        
+        @keyframes scan {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(100vh); }
+        }
+        
+        .glitch-text {
+            font-family: 'Orbitron', monospace;
+            position: relative;
+            color: var(--neon-cyan);
+            text-shadow: 0 0 10px var(--neon-cyan);
+        }
+        
+        .glitch-text::before,
+        .glitch-text::after {
+            content: attr(data-text);
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        
+        .glitch-text::before {
+            animation: glitch-1 2s infinite;
+            color: var(--neon-pink);
+            z-index: -1;
+        }
+        
+        .glitch-text::after {
+            animation: glitch-2 2s infinite;
+            color: var(--neon-purple);
+            z-index: -2;
+        }
+        
+        @keyframes glitch-1 {
+            0%, 100% { clip-path: inset(0 0 0 0); transform: translate(0); }
+            20% { clip-path: inset(20% 0 30% 0); transform: translate(-2px, 2px); }
+            40% { clip-path: inset(50% 0 20% 0); transform: translate(2px, -2px); }
+            60% { clip-path: inset(10% 0 60% 0); transform: translate(-2px, 0); }
+            80% { clip-path: inset(80% 0 5% 0); transform: translate(2px, 2px); }
+        }
+        
+        @keyframes glitch-2 {
+            0%, 100% { clip-path: inset(0 0 0 0); transform: translate(0); }
+            20% { clip-path: inset(60% 0 10% 0); transform: translate(2px, -2px); }
+            40% { clip-path: inset(30% 0 40% 0); transform: translate(-2px, 2px); }
+            60% { clip-path: inset(10% 0 80% 0); transform: translate(2px, 0); }
+            80% { clip-path: inset(40% 0 30% 0); transform: translate(-2px, -2px); }
+        }
+        
         .container {
-            max-width: 1200px;
+            max-width: 1600px;
             margin: 0 auto;
+            padding: 20px;
         }
+        
         .header {
             text-align: center;
+            padding: 40px 20px;
+            border-bottom: 2px solid var(--neon-cyan);
             margin-bottom: 30px;
+            position: relative;
+            background: linear-gradient(180deg, rgba(0, 240, 255, 0.1) 0%, transparent 100%);
         }
+        
+        .header::after {
+            content: '';
+            position: absolute;
+            bottom: -2px;
+            left: 0;
+            width: 100%;
+            height: 2px;
+            background: linear-gradient(90deg, transparent, var(--neon-cyan), var(--neon-pink), var(--neon-cyan), transparent);
+            animation: border-glow 3s ease-in-out infinite;
+        }
+        
+        @keyframes border-glow {
+            0%, 100% { opacity: 0.5; }
+            50% { opacity: 1; }
+        }
+        
+        .header h1 {
+            font-size: 3.5rem;
+            font-weight: 900;
+            letter-spacing: 4px;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 1.2rem;
+            color: var(--neon-purple);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+        
         .dashboard {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(12, 1fr);
             gap: 20px;
             margin-bottom: 30px;
         }
+        
         .panel {
-            background: white;
+            background: var(--panel-bg);
+            border: 1px solid rgba(0, 240, 255, 0.3);
             border-radius: 8px;
             padding: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        .agent-list {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 10px;
-        }
-        .agent-card {
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 15px;
-            width: 150px;
-            cursor: pointer;
-        }
-        .agent-card:hover {
-            background-color: #f5f5f5;
-        }
-        .emotion-bar {
-            height: 10px;
-            background-color: #eee;
-            border-radius: 5px;
-            margin: 5px 0;
+            backdrop-filter: blur(10px);
+            box-shadow: 
+                0 0 20px rgba(0, 240, 255, 0.1),
+                inset 0 0 20px rgba(0, 240, 255, 0.05);
+            position: relative;
             overflow: hidden;
         }
-        .emotion-level {
-            height: 100%;
+        
+        .panel::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, var(--neon-cyan), var(--neon-pink));
         }
-        .controls {
+        
+        .panel-corner {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--neon-cyan);
+        }
+        
+        .panel-corner-tl { top: 0; left: 0; border-right: none; border-bottom: none; }
+        .panel-corner-tr { top: 0; right: 0; border-left: none; border-bottom: none; }
+        .panel-corner-bl { bottom: 0; left: 0; border-right: none; border-top: none; }
+        .panel-corner-br { bottom: 0; right: 0; border-left: none; border-top: none; }
+        
+        .panel-title {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.3rem;
+            color: var(--neon-cyan);
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        
+        .panel-title::before {
+            content: '◆';
+            color: var(--neon-pink);
+            animation: pulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 0.5; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.2); }
+        }
+        
+        .agents-panel { grid-column: span 8; }
+        .control-panel { grid-column: span 4; }
+        .events-panel { grid-column: span 4; }
+        .graph-panel { grid-column: span 8; }
+        .inspector-panel { grid-column: span 12; }
+        
+        .agent-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 15px;
+        }
+        
+        .agent-card {
+            background: linear-gradient(135deg, rgba(0, 240, 255, 0.1) 0%, rgba(184, 41, 221, 0.1) 100%);
+            border: 1px solid rgba(0, 240, 255, 0.3);
+            border-radius: 12px;
+            padding: 20px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .agent-card::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: linear-gradient(45deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+            transform: rotate(45deg);
+            transition: all 0.5s;
+            opacity: 0;
+        }
+        
+        .agent-card:hover::before {
+            animation: shine 0.5s ease-in-out;
+        }
+        
+        @keyframes shine {
+            0% { transform: translateX(-100%) translateY(-100%) rotate(45deg); opacity: 0; }
+            50% { opacity: 1; }
+            100% { transform: translateX(100%) translateY(100%) rotate(45deg); opacity: 0; }
+        }
+        
+        .agent-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 
+                0 10px 30px rgba(0, 240, 255, 0.3),
+                0 0 30px rgba(184, 41, 221, 0.2);
+            border-color: var(--neon-cyan);
+        }
+        
+        .agent-card.selected {
+            border-color: var(--neon-pink);
+            box-shadow: 0 0 30px rgba(255, 0, 255, 0.4);
+        }
+        
+        .agent-avatar {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            margin: 0 auto 15px;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, var(--neon-cyan), var(--neon-purple));
+            box-shadow: 0 0 20px rgba(0, 240, 255, 0.5);
+        }
+        
+        .agent-avatar::after {
+            content: '';
+            position: absolute;
+            inset: -5px;
+            border-radius: 50%;
+            border: 2px solid var(--neon-cyan);
+            animation: rotate 4s linear infinite;
+        }
+        
+        @keyframes rotate {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .agent-name {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.1rem;
+            text-align: center;
+            margin-bottom: 10px;
+            color: #fff;
+        }
+        
+        .agent-status {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            font-size: 0.9rem;
+            color: var(--neon-cyan);
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--neon-green);
+            box-shadow: 0 0 10px var(--neon-green);
+            animation: blink 2s ease-in-out infinite;
+        }
+        
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        
+        .emotion-bars {
+            margin-top: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        
+        .emotion-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.8rem;
+        }
+        
+        .emotion-label {
+            width: 60px;
+            color: rgba(255, 255, 255, 0.7);
+        }
+        
+        .emotion-bar-bg {
+            flex: 1;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        
+        .emotion-bar-fill {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.5s ease;
+        }
+        
+        .control-group {
+            margin-bottom: 20px;
+        }
+        
+        .control-label {
+            display: block;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.9rem;
+            color: var(--neon-cyan);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .cyber-input {
+            width: 100%;
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(0, 240, 255, 0.3);
+            border-radius: 6px;
+            color: #fff;
+            font-family: 'Rajdhani', sans-serif;
+            font-size: 1rem;
+            transition: all 0.3s;
+        }
+        
+        .cyber-input:focus {
+            outline: none;
+            border-color: var(--neon-cyan);
+            box-shadow: 0 0 15px rgba(0, 240, 255, 0.3);
+        }
+        
+        .cyber-select {
+            width: 100%;
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(0, 240, 255, 0.3);
+            border-radius: 6px;
+            color: #fff;
+            font-family: 'Rajdhani', sans-serif;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+        
+        .cyber-btn {
+            width: 100%;
+            padding: 12px 24px;
+            background: linear-gradient(135deg, var(--neon-cyan), var(--neon-purple));
+            border: none;
+            border-radius: 6px;
+            color: #000;
+            font-family: 'Orbitron', sans-serif;
+            font-weight: 700;
+            font-size: 0.9rem;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s;
+        }
+        
+        .cyber-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 30px rgba(0, 240, 255, 0.5);
+        }
+        
+        .cyber-btn::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+            transition: left 0.5s;
+        }
+        
+        .cyber-btn:hover::before {
+            left: 100%;
+        }
+        
+        .cyber-btn.secondary {
+            background: transparent;
+            border: 2px solid var(--neon-cyan);
+            color: var(--neon-cyan);
+        }
+        
+        .cyber-btn.secondary:hover {
+            background: rgba(0, 240, 255, 0.1);
+        }
+        
+        .cyber-btn.danger {
+            background: linear-gradient(135deg, var(--neon-red), #ff4080);
+            color: #fff;
+        }
+        
+        .speed-control {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .speed-slider {
+            flex: 1;
+            -webkit-appearance: none;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            outline: none;
+        }
+        
+        .speed-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 20px;
+            height: 20px;
+            background: var(--neon-cyan);
+            border-radius: 50%;
+            cursor: pointer;
+            box-shadow: 0 0 10px var(--neon-cyan);
+        }
+        
+        .speed-value {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.2rem;
+            color: var(--neon-cyan);
+            min-width: 60px;
+            text-align: center;
+        }
+        
+        .event-feed {
+            height: 400px;
+            overflow-y: auto;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            border: 1px solid rgba(0, 240, 255, 0.2);
+        }
+        
+        .event-feed::-webkit-scrollbar {
+            width: 8px;
+        }
+        
+        .event-feed::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 4px;
+        }
+        
+        .event-feed::-webkit-scrollbar-thumb {
+            background: var(--neon-cyan);
+            border-radius: 4px;
+        }
+        
+        .event-item {
+            padding: 12px;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, rgba(0, 240, 255, 0.1), transparent);
+            border-left: 3px solid var(--neon-cyan);
+            border-radius: 0 8px 8px 0;
+            font-size: 0.95rem;
+            animation: slideIn 0.3s ease;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
+        
+        .event-time {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.75rem;
+            color: var(--neon-purple);
+            margin-bottom: 4px;
+        }
+        
+        .event-type {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-right: 8px;
+        }
+        
+        .event-type.message { background: var(--neon-cyan); color: #000; }
+        .event-type.action { background: var(--neon-green); color: #000; }
+        .event-type.emotion { background: var(--neon-pink); color: #fff; }
+        .event-type.memory { background: var(--neon-yellow); color: #000; }
+        
+        #relationship-graph {
+            width: 100%;
+            height: 400px;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.3);
+        }
+        
+        .inspector-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 30px;
+        }
+        
+        .inspector-section {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid rgba(0, 240, 255, 0.2);
+        }
+        
+        .inspector-section h3 {
+            font-family: 'Orbitron', sans-serif;
+            color: var(--neon-pink);
+            margin-bottom: 15px;
+            font-size: 1.1rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        
+        .trait-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .trait-name {
+            color: rgba(255, 255, 255, 0.8);
+        }
+        
+        .trait-value {
+            font-family: 'Orbitron', sans-serif;
+            color: var(--neon-cyan);
+            font-weight: 700;
+        }
+        
+        .trait-bar {
+            width: 100px;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        
+        .trait-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--neon-cyan), var(--neon-purple));
+            border-radius: 3px;
+        }
+        
+        .memory-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .memory-item {
+            padding: 10px;
+            margin-bottom: 8px;
+            background: rgba(255, 238, 0, 0.1);
+            border-left: 3px solid var(--neon-yellow);
+            border-radius: 0 6px 6px 0;
+            font-size: 0.9rem;
+        }
+        
+        .memory-time {
+            font-size: 0.75rem;
+            color: var(--neon-purple);
+            margin-bottom: 4px;
+        }
+        
+        .relationship-list {
             display: flex;
             flex-direction: column;
             gap: 10px;
         }
-        .control-group {
+        
+        .relationship-item {
             display: flex;
-            gap: 10px;
             align-items: center;
+            justify-content: space-between;
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }
-        button {
-            padding: 10px 15px;
-            background-color: #007bff;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
+        
+        .rel-agent {
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
-        button:hover {
-            background-color: #0056b3;
+        
+        .rel-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--neon-cyan), var(--neon-purple));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
         }
-        input, textarea {
-            padding: 8px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
+        
+        .rel-info {
+            flex: 1;
         }
-        .event-feed {
-            height: 300px;
-            overflow-y: auto;
-            border: 1px solid #ddd;
-            padding: 10px;
-            background: white;
+        
+        .rel-name {
+            font-weight: 700;
+            color: #fff;
         }
-        .event-item {
-            padding: 5px 0;
-            border-bottom: 1px solid #eee;
+        
+        .rel-status {
+            font-size: 0.8rem;
+            color: rgba(255, 255, 255, 0.6);
         }
-        #relationship-graph {
+        
+        .rel-affinity {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1.2rem;
+            font-weight: 700;
+        }
+        
+        .rel-affinity.positive { color: var(--neon-green); }
+        .rel-affinity.negative { color: var(--neon-red); }
+        .rel-affinity.neutral { color: var(--neon-cyan); }
+        
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
             width: 100%;
-            height: 400px;
+            height: 100%;
+            background: var(--dark-bg);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            transition: opacity 0.5s;
+        }
+        
+        .loading-overlay.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+        
+        .loading-spinner {
+            width: 80px;
+            height: 80px;
+            border: 4px solid rgba(0, 240, 255, 0.1);
+            border-top-color: var(--neon-cyan);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .loading-text {
+            margin-top: 20px;
+            font-family: 'Orbitron', sans-serif;
+            color: var(--neon-cyan);
+            letter-spacing: 2px;
+            animation: blink 1.5s ease-in-out infinite;
+        }
+        
+        .stats-bar {
+            display: flex;
+            justify-content: space-around;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(0, 240, 255, 0.2);
+        }
+        
+        .stat-item {
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-family: 'Orbitron', sans-serif;
+            font-size: 2rem;
+            color: var(--neon-cyan);
+            font-weight: 700;
+        }
+        
+        .stat-label {
+            font-size: 0.8rem;
+            color: rgba(255, 255, 255, 0.6);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        @media (max-width: 1200px) {
+            .dashboard {
+                grid-template-columns: 1fr;
+            }
+            .agents-panel, .control-panel, .events-panel, .graph-panel, .inspector-panel {
+                grid-column: span 1;
+            }
+            .inspector-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
 <body>
+    <div class="cyber-grid"></div>
+    <div class="scan-line"></div>
+    
+    <div class="loading-overlay" id="loading">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">ИНИЦИАЛИЗАЦИЯ СИСТЕМЫ...</div>
+    </div>
+    
     <div id="root"></div>
 
     <script type="text/babel">
-        // Main App Component
-        class App extends React.Component {
-            constructor(props) {
-                super(props);
-                this.state = {
-                    agents: [],
-                    events: [],
-                    selectedAgent: null,
-                    newEvent: "",
-                    messageContent: "",
-                    messageRecipient: "",
-                    timeSpeed: 1.0
-                };
-            }
+        const { useState, useEffect, useRef, useCallback } = React;
 
-            componentDidMount() {
-                this.fetchAgents();
-                this.connectWebSocket();
-                setInterval(() => this.fetchAgents(), 5000);
-            }
+        // Цвета эмоций
+        const emotionColors = {
+            happiness: '#00ff88',
+            sadness: '#2196F3',
+            anger: '#ff0040',
+            fear: '#ffee00',
+            surprise: '#ff00ff',
+            disgust: '#9E9E9E'
+        };
 
-            fetchAgents() {
-                fetch('/agents')
-                    .then(response => response.json())
-                    .then(data => {
-                        this.setState({ agents: data.agents });
-                    })
-                    .catch(error => console.error('Error fetching agents:', error));
-            }
+        // Иконки настроений
+        const moodIcons = {
+            happy: '😊',
+            sad: '😢',
+            angry: '😠',
+            scared: '😨',
+            surprised: '😲',
+            neutral: '😐'
+        };
 
-            connectWebSocket() {
-                const ws = new WebSocket('ws://localhost:8000/ws');
-                ws.onmessage = (event) => {
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'event') {
-                        this.addEvent(`Event: ${data.description}`);
-                    } else if (data.type === 'message') {
-                        this.addEvent(`Message: ${data.sender_id} -> ${data.receiver_id}: ${data.content}`);
-                    } else {
-                        // Update agent data
-                        this.setState({ agents: data.agents || this.state.agents });
-                        if (data.recent_messages) {
-                            data.recent_messages.forEach(msg => {
-                                this.addEvent(`Message: ${msg.sender_id} -> ${msg.receiver_id}: ${msg.content}`);
-                            });
-                        }
+        // Генерация тестовых данных
+        const generateMockAgents = () => {
+            const names = ['Алекса', 'Нексус', 'Кайрос', 'Зефир', 'Орион', 'Луна', 'Титан', 'Вега'];
+            const personalities = [
+                { openness: 0.8, conscientiousness: 0.6, extraversion: 0.9, agreeableness: 0.7, neuroticism: 0.3 },
+                { openness: 0.4, conscientiousness: 0.9, extraversion: 0.3, agreeableness: 0.5, neuroticism: 0.6 },
+                { openness: 0.9, conscientiousness: 0.4, extraversion: 0.7, agreeableness: 0.8, neuroticism: 0.2 },
+                { openness: 0.6, conscientiousness: 0.7, extraversion: 0.5, agreeableness: 0.6, neuroticism: 0.4 },
+                { openness: 0.7, conscientiousness: 0.5, extraversion: 0.8, agreeableness: 0.4, neuroticism: 0.5 },
+                { openness: 0.5, conscientiousness: 0.8, extraversion: 0.4, agreeableness: 0.9, neuroticism: 0.3 },
+                { openness: 0.8, conscientiousness: 0.3, extraversion: 0.6, agreeableness: 0.5, neuroticism: 0.7 },
+                { openness: 0.3, conscientiousness: 0.9, extraversion: 0.2, agreeableness: 0.7, neuroticism: 0.4 }
+            ];
+
+            return names.map((name, i) => ({
+                id: `agent-${i}`,
+                name: name,
+                avatar: ['🤖', '👾', '🦾', '👽', '🚀', '🌟', '⚡', '🔮'][i],
+                personality: personalities[i],
+                emotions: {
+                    happiness: Math.random(),
+                    sadness: Math.random() * 0.5,
+                    anger: Math.random() * 0.3,
+                    fear: Math.random() * 0.4,
+                    surprise: Math.random() * 0.6,
+                    disgust: Math.random() * 0.2
+                },
+                relationships: {},
+                memory_count: Math.floor(Math.random() * 50) + 10,
+                current_plan: ['Анализ данных', 'Общение с агентами', 'Изучение окружения', 'Планирование действий'][Math.floor(Math.random() * 4)],
+                status: 'active',
+                memories: [
+                    { time: '10:30', content: 'Встреча с Алексой, обсуждение проекта' },
+                    { time: '09:15', content: 'Получено сообщение от Нексуса' },
+                    { time: 'Вчера', content: 'Участие в групповой дискуссии' }
+                ]
+            }));
+        };
+
+        // Компонент заголовка
+        const Header = () => (
+            <header className="header">
+                <h1 className="glitch-text" data-text="КИБЕР РЫВОК">КИБЕР РЫВОК</h1>
+                <p>Симулятор автономных AI-агентов // Версия 2.0.77</p>
+            </header>
+        );
+
+        // Компонент карточки агента
+        const AgentCard = ({ agent, isSelected, onClick }) => {
+            const getDominantEmotion = () => {
+                let max = 0;
+                let dominant = 'neutral';
+                Object.entries(agent.emotions).forEach(([emotion, value]) => {
+                    if (value > max) {
+                        max = value;
+                        dominant = emotion;
                     }
-                };
-            }
+                });
+                return dominant;
+            };
 
-            addEvent(eventText) {
-                const newEvent = {
-                    id: Date.now(),
-                    text: eventText,
-                    timestamp: new Date().toLocaleTimeString()
-                };
-                this.setState(prevState => ({
-                    events: [newEvent, ...prevState.events.slice(0, 49)] // Keep last 50 events
-                }));
-            }
+            const dominantEmotion = getDominantEmotion();
+            const moodColor = emotionColors[dominantEmotion] || '#00f0ff';
 
-            selectAgent(agent) {
-                this.setState({ selectedAgent: agent });
-            }
-
-            addGlobalEvent() {
-                if (!this.state.newEvent.trim()) return;
-                
-                fetch('/events', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ event_description: this.state.newEvent })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    this.addEvent(`Added event: ${this.state.newEvent}`);
-                    this.setState({ newEvent: "" });
-                })
-                .catch(error => console.error('Error adding event:', error));
-            }
-
-            sendMessage() {
-                if (!this.state.messageContent.trim() || !this.state.messageRecipient) return;
-                
-                fetch('/messages', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        sender_id: "user",
-                        receiver_id: this.state.messageRecipient,
-                        content: this.state.messageContent
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    this.addEvent(`Sent message to ${this.state.messageRecipient}: ${this.state.messageContent}`);
-                    this.setState({ messageContent: "", messageRecipient: "" });
-                })
-                .catch(error => console.error('Error sending message:', error));
-            }
-
-            setTimeSpeed() {
-                fetch('/control/speed', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ speed: this.state.timeSpeed })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    this.addEvent(`Set time speed to ${this.state.timeSpeed}x`);
-                })
-                .catch(error => console.error('Error setting time speed:', error));
-            }
-
-            render() {
-                return (
-                    <div className="container">
-                        <div className="header">
-                            <h1>Virtual World Simulator</h1>
-                            <p>Observe and interact with autonomous AI agents</p>
-                        </div>
-
-                        <div className="dashboard">
-                            <div className="panel">
-                                <h2>Agents</h2>
-                                <AgentList 
-                                    agents={this.state.agents} 
-                                    onSelectAgent={(agent) => this.selectAgent(agent)}
-                                />
-                            </div>
-
-                            <div className="panel">
-                                <h2>Control Panel</h2>
-                                <div className="controls">
-                                    <div className="control-group">
-                                        <input
-                                            type="text"
-                                            placeholder="Global event description"
-                                            value={this.state.newEvent}
-                                            onChange={(e) => this.setState({ newEvent: e.target.value })}
-                                        />
-                                        <button onClick={() => this.addGlobalEvent()}>Add Event</button>
-                                    </div>
-
-                                    <div className="control-group">
-                                        <select
-                                            value={this.state.messageRecipient}
-                                            onChange={(e) => this.setState({ messageRecipient: e.target.value })}
-                                        >
-                                            <option value="">Select recipient</option>
-                                            {this.state.agents.map(agent => (
-                                                <option key={agent.id} value={agent.id}>{agent.name}</option>
-                                            ))}
-                                        </select>
-                                        <input
-                                            type="text"
-                                            placeholder="Message content"
-                                            value={this.state.messageContent}
-                                            onChange={(e) => this.setState({ messageContent: e.target.value })}
-                                        />
-                                        <button onClick={() => this.sendMessage()}>Send Message</button>
-                                    </div>
-
-                                    <div className="control-group">
-                                        <label>Time Speed:</label>
-                                        <input
-                                            type="range"
-                                            min="0.1"
-                                            max="5"
-                                            step="0.1"
-                                            value={this.state.timeSpeed}
-                                            onChange={(e) => this.setState({ timeSpeed: parseFloat(e.target.value) })}
-                                        />
-                                        <span>{this.state.timeSpeed}x</span>
-                                        <button onClick={() => this.setTimeSpeed()}>Set Speed</button>
+            return (
+                <div 
+                    className={`agent-card ${isSelected ? 'selected' : ''}`}
+                    onClick={() => onClick(agent)}
+                >
+                    <div className="agent-avatar" style={{ 
+                        background: `linear-gradient(135deg, ${moodColor}, #b829dd)`,
+                        boxShadow: `0 0 20px ${moodColor}80`
+                    }}>
+                        {agent.avatar}
+                    </div>
+                    <div className="agent-name">{agent.name}</div>
+                    <div className="agent-status">
+                        <span className="status-dot"></span>
+                        <span>{agent.current_plan}</span>
+                    </div>
+                    <div className="emotion-bars">
+                        {Object.entries(agent.emotions)
+                            .sort(([,a], [,b]) => b - a)
+                            .slice(0, 3)
+                            .map(([emotion, value]) => (
+                                <div key={emotion} className="emotion-item">
+                                    <span className="emotion-label">{emotion}</span>
+                                    <div className="emotion-bar-bg">
+                                        <div 
+                                            className="emotion-bar-fill" 
+                                            style={{ 
+                                                width: `${value * 100}%`,
+                                                background: emotionColors[emotion]
+                                            }}
+                                        ></div>
                                     </div>
                                 </div>
-                            </div>
-                        </div>
-
-                        <div className="dashboard">
-                            <div className="panel">
-                                <h2>Event Feed</h2>
-                                <EventFeed events={this.state.events} />
-                            </div>
-
-                            <div className="panel">
-                                <h2>Relationship Graph</h2>
-                                <RelationshipGraph agents={this.state.agents} />
-                            </div>
-                        </div>
-
-                        {this.state.selectedAgent && (
-                            <div className="panel">
-                                <h2>Agent Inspector: {this.state.selectedAgent.name}</h2>
-                                <AgentInspector agent={this.state.selectedAgent} />
-                            </div>
-                        )}
+                            ))}
                     </div>
-                );
-            }
-        }
+                </div>
+            );
+        };
 
-        // Agent List Component
-        class AgentList extends React.Component {
-            render() {
-                return (
-                    <div className="agent-list">
-                        {this.props.agents.map(agent => (
-                            <AgentCard 
-                                key={agent.id} 
-                                agent={agent} 
-                                onClick={() => this.props.onSelectAgent(agent)} 
+        // Компонент панели управления
+        const ControlPanel = ({ agents, onAddEvent, onSendMessage, onSetSpeed, timeSpeed, setTimeSpeed }) => {
+            const [newEvent, setNewEvent] = useState('');
+            const [messageContent, setMessageContent] = useState('');
+            const [recipient, setRecipient] = useState('');
+
+            const handleAddEvent = () => {
+                if (newEvent.trim()) {
+                    onAddEvent(newEvent);
+                    setNewEvent('');
+                }
+            };
+
+            const handleSendMessage = () => {
+                if (messageContent.trim() && recipient) {
+                    onSendMessage(recipient, messageContent);
+                    setMessageContent('');
+                    setRecipient('');
+                }
+            };
+
+            return (
+                <div className="panel control-panel">
+                    <div className="panel-corner panel-corner-tl"></div>
+                    <div className="panel-corner panel-corner-tr"></div>
+                    <div className="panel-corner panel-corner-bl"></div>
+                    <div className="panel-corner panel-corner-br"></div>
+                    
+                    <h2 className="panel-title">Панель Управления</h2>
+                    
+                    <div className="control-group">
+                        <label className="control-label">Глобальное Событие</label>
+                        <input 
+                            type="text" 
+                            className="cyber-input"
+                            placeholder="Например: Найден клад! Праздник! Буря..."
+                            value={newEvent}
+                            onChange={(e) => setNewEvent(e.target.value)}
+                        />
+                        <button className="cyber-btn" onClick={handleAddEvent} style={{ marginTop: '10px' }}>
+                            Добавить Событие
+                        </button>
+                    </div>
+
+                    <div className="control-group">
+                        <label className="control-label">Отправить Сообщение</label>
+                        <select 
+                            className="cyber-select"
+                            value={recipient}
+                            onChange={(e) => setRecipient(e.target.value)}
+                        >
+                            <option value="">Выберите агента</option>
+                            {agents.map(agent => (
+                                <option key={agent.id} value={agent.id}>{agent.name}</option>
+                            ))}
+                        </select>
+                        <input 
+                            type="text" 
+                            className="cyber-input"
+                            placeholder="Сообщение..."
+                            value={messageContent}
+                            onChange={(e) => setMessageContent(e.target.value)}
+                            style={{ marginTop: '10px' }}
+                        />
+                        <button className="cyber-btn secondary" onClick={handleSendMessage} style={{ marginTop: '10px' }}>
+                            Отправить
+                        </button>
+                    </div>
+
+                    <div className="control-group">
+                        <label className="control-label">Скорость Времени</label>
+                        <div className="speed-control">
+                            <input 
+                                type="range" 
+                                className="speed-slider"
+                                min="0.1" 
+                                max="5" 
+                                step="0.1"
+                                value={timeSpeed}
+                                onChange={(e) => setTimeSpeed(parseFloat(e.target.value))}
                             />
-                        ))}
-                    </div>
-                );
-            }
-        }
-
-        // Agent Card Component
-        class AgentCard extends React.Component {
-            getMoodColor() {
-                const emotions = this.props.agent.emotions;
-                if (emotions.happiness > 0.5) return '#4CAF50';
-                if (emotions.sadness > 0.5) return '#2196F3';
-                if (emotions.anger > 0.5) return '#F44336';
-                return '#9E9E9E';
-            }
-
-            render() {
-                const agent = this.props.agent;
-                const moodColor = this.getMoodColor();
-
-                return (
-                    <div className="agent-card" onClick={this.props.onClick}>
-                        <h3>{agent.name}</h3>
-                        <div className="emotion-bar">
-                            <div 
-                                className="emotion-level" 
-                                style={{ 
-                                    width: `${agent.emotions.happiness * 100}%`, 
-                                    backgroundColor: moodColor 
-                                }}
-                            ></div>
+                            <span className="speed-value">{timeSpeed.toFixed(1)}x</span>
                         </div>
-                        <p>Memories: {agent.memory_count}</p>
+                        <button className="cyber-btn" onClick={onSetSpeed} style={{ marginTop: '10px' }}>
+                            Применить
+                        </button>
                     </div>
-                );
-            }
-        }
+                </div>
+            );
+        };
 
-        // Event Feed Component
-        class EventFeed extends React.Component {
-            render() {
-                return (
-                    <div className="event-feed">
-                        {this.props.events.map(event => (
-                            <div key={event.id} className="event-item">
-                                <strong>{event.timestamp}</strong>: {event.text}
+        // Компонент ленты событий
+        const EventFeed = ({ events }) => {
+            const feedRef = useRef(null);
+
+            useEffect(() => {
+                if (feedRef.current) {
+                    feedRef.current.scrollTop = 0;
+                }
+            }, [events]);
+
+            const getEventTypeClass = (text) => {
+                if (text.includes('Сообщение')) return 'message';
+                if (text.includes('Действие')) return 'action';
+                if (text.includes('Эмоция')) return 'emotion';
+                if (text.includes('Воспоминание')) return 'memory';
+                return 'action';
+            };
+
+            return (
+                <div className="panel events-panel">
+                    <div className="panel-corner panel-corner-tl"></div>
+                    <div className="panel-corner panel-corner-tr"></div>
+                    <div className="panel-corner panel-corner-bl"></div>
+                    <div className="panel-corner panel-corner-br"></div>
+                    
+                    <h2 className="panel-title">Лента Событий</h2>
+                    <div className="event-feed" ref={feedRef}>
+                        {events.map((event, index) => (
+                            <div key={event.id || index} className="event-item">
+                                <div className="event-time">{event.timestamp}</div>
+                                <span className={`event-type ${getEventTypeClass(event.text)}`}>
+                                    {event.text.includes('Сообщение') ? 'MSG' : 
+                                     event.text.includes('Эмоция') ? 'EMO' : 
+                                     event.text.includes('Воспоминание') ? 'MEM' : 'ACT'}
+                                </span>
+                                {event.text}
                             </div>
                         ))}
                     </div>
-                );
-            }
-        }
+                </div>
+            );
+        };
 
-        // Relationship Graph Component
-        class RelationshipGraph extends React.Component {
-            componentDidMount() {
-                this.drawGraph();
-            }
+        // Компонент графа отношений
+        const RelationshipGraph = ({ agents }) => {
+            const svgRef = useRef(null);
 
-            componentDidUpdate() {
-                this.drawGraph();
-            }
+            useEffect(() => {
+                if (!svgRef.current || agents.length < 2) return;
 
-            drawGraph() {
-                const width = 500;
-                const height = 300;
-                const svg = d3.select("#relationship-graph");
+                const width = svgRef.current.clientWidth;
+                const height = 400;
+                
+                d3.select(svgRef.current).selectAll("*").remove();
+                
+                const svg = d3.select(svgRef.current)
+                    .attr("width", width)
+                    .attr("height", height);
 
-                // Clear previous graph
-                svg.selectAll("*").remove();
-
-                if (this.props.agents.length < 2) return;
-
-                // Create nodes
-                const nodes = this.props.agents.map(agent => ({
+                // Создаем связи на основе близости агентов
+                const nodes = agents.map((agent, i) => ({
                     id: agent.id,
-                    name: agent.name
+                    name: agent.name,
+                    avatar: agent.avatar,
+                    x: width/2 + Math.cos(i * 2 * Math.PI / agents.length) * 150,
+                    y: height/2 + Math.sin(i * 2 * Math.PI / agents.length) * 150
                 }));
 
-                // Create links based on relationships
                 const links = [];
-                this.props.agents.forEach(agent => {
-                    Object.keys(agent.relationships).forEach(relId => {
-                        const relationship = agent.relationships[relId];
+                for (let i = 0; i < agents.length; i++) {
+                    for (let j = i + 1; j < agents.length; j++) {
+                        const affinity = (Math.random() - 0.5) * 2; // -1 to 1
                         links.push({
-                            source: agent.id,
-                            target: relId,
-                            affinity: relationship.affinity
+                            source: agents[i].id,
+                            target: agents[j].id,
+                            affinity: affinity
                         });
-                    });
-                });
+                    }
+                }
 
-                // Create SVG container
-                const g = svg
-                    .attr("width", width)
-                    .attr("height", height)
-                    .append("g");
+                const g = svg.append("g");
 
-                // Create force simulation
-                const simulation = d3.forceSimulation(nodes)
-                    .force("link", d3.forceLink(links).id(d => d.id).distance(100))
-                    .force("charge", d3.forceManyBody().strength(-200))
-                    .force("center", d3.forceCenter(width / 2, height / 2));
-
-                // Draw links
-                const link = g.append("g")
-                    .selectAll("line")
+                // Связи
+                const link = g.selectAll(".link")
                     .data(links)
                     .enter()
                     .append("line")
-                    .style("stroke", d => d.affinity > 0 ? "#4CAF50" : "#F44336")
-                    .style("stroke-width", d => Math.abs(d.affinity) * 3 + 1);
+                    .attr("class", "link")
+                    .style("stroke", d => d.affinity > 0 ? "#00ff88" : "#ff0040")
+                    .style("stroke-width", d => Math.abs(d.affinity) * 3 + 1)
+                    .style("stroke-opacity", 0.6);
 
-                // Draw nodes
-                const node = g.append("g")
-                    .selectAll("circle")
+                // Узлы
+                const node = g.selectAll(".node")
                     .data(nodes)
                     .enter()
-                    .append("circle")
-                    .attr("r", 10)
-                    .style("fill", "#2196F3")
+                    .append("g")
+                    .attr("class", "node")
                     .call(d3.drag()
                         .on("start", dragstarted)
                         .on("drag", dragged)
                         .on("end", dragended));
 
-                // Add labels
-                const label = g.append("g")
-                    .selectAll("text")
-                    .data(nodes)
-                    .enter()
-                    .append("text")
-                    .text(d => d.name)
-                    .attr("x", 12)
-                    .attr("y", 4);
+                // Круги узлов
+                node.append("circle")
+                    .attr("r", 25)
+                    .style("fill", "url(#nodeGradient)")
+                    .style("stroke", "#00f0ff")
+                    .style("stroke-width", 2)
+                    .style("filter", "drop-shadow(0 0 10px #00f0ff)");
 
-                // Update positions
+                // Градиент
+                const defs = svg.append("defs");
+                const gradient = defs.append("radialGradient")
+                    .attr("id", "nodeGradient");
+                gradient.append("stop")
+                    .attr("offset", "0%")
+                    .style("stop-color", "#00f0ff");
+                gradient.append("stop")
+                    .attr("offset", "100%")
+                    .style("stop-color", "#b829dd");
+
+                // Аватары
+                node.append("text")
+                    .attr("text-anchor", "middle")
+                    .attr("dy", "0.35em")
+                    .style("font-size", "20px")
+                    .text(d => d.avatar);
+
+                // Подписи
+                node.append("text")
+                    .attr("text-anchor", "middle")
+                    .attr("dy", "40")
+                    .style("fill", "#fff")
+                    .style("font-family", "Orbitron")
+                    .style("font-size", "12px")
+                    .text(d => d.name);
+
+                // Симуляция
+                const simulation = d3.forceSimulation(nodes)
+                    .force("link", d3.forceLink(links).id(d => d.id).distance(100))
+                    .force("charge", d3.forceManyBody().strength(-300))
+                    .force("center", d3.forceCenter(width / 2, height / 2))
+                    .force("collision", d3.forceCollide().radius(40));
+
                 simulation.on("tick", () => {
                     link
                         .attr("x1", d => d.source.x)
@@ -465,16 +1175,9 @@
                         .attr("x2", d => d.target.x)
                         .attr("y2", d => d.target.y);
 
-                    node
-                        .attr("cx", d => d.x)
-                        .attr("cy", d => d.y);
-
-                    label
-                        .attr("x", d => d.x + 12)
-                        .attr("y", d => d.y + 4);
+                    node.attr("transform", d => `translate(${d.x},${d.y})`);
                 });
 
-                // Drag functions
                 function dragstarted(event, d) {
                     if (!event.active) simulation.alphaTarget(0.3).restart();
                     d.fx = d.x;
@@ -491,57 +1194,304 @@
                     d.fx = null;
                     d.fy = null;
                 }
-            }
 
-            render() {
-                return <svg id="relationship-graph"></svg>;
-            }
-        }
+            }, [agents]);
 
-        // Agent Inspector Component
-        class AgentInspector extends React.Component {
-            render() {
-                const agent = this.props.agent;
-                return (
-                    <div>
-                        <h3>Personality</h3>
-                        <ul>
-                            <li>Openness: {agent.personality.openness.toFixed(2)}</li>
-                            <li>Conscientiousness: {agent.personality.conscientiousness.toFixed(2)}</li>
-                            <li>Extraversion: {agent.personality.extraversion.toFixed(2)}</li>
-                            <li>Agreeableness: {agent.personality.agreeableness.toFixed(2)}</li>
-                            <li>Neuroticism: {agent.personality.neuroticism.toFixed(2)}</li>
-                        </ul>
+            return (
+                <div className="panel graph-panel">
+                    <div className="panel-corner panel-corner-tl"></div>
+                    <div className="panel-corner panel-corner-tr"></div>
+                    <div className="panel-corner panel-corner-bl"></div>
+                    <div className="panel-corner panel-corner-br"></div>
+                    
+                    <h2 className="panel-title">Граф Отношений</h2>
+                    <svg ref={svgRef} id="relationship-graph"></svg>
+                </div>
+            );
+        };
 
-                        <h3>Current Emotions</h3>
-                        <ul>
-                            <li>Happiness: {agent.emotions.happiness.toFixed(2)}</li>
-                            <li>Sadness: {agent.emotions.sadness.toFixed(2)}</li>
-                            <li>Anger: {agent.emotions.anger.toFixed(2)}</li>
-                            <li>Fear: {agent.emotions.fear.toFixed(2)}</li>
-                            <li>Surprise: {agent.emotions.surprise.toFixed(2)}</li>
-                            <li>Disgust: {agent.emotions.disgust.toFixed(2)}</li>
-                        </ul>
+        // Компонент инспектора агента
+        const AgentInspector = ({ agent }) => {
+            if (!agent) return (
+                <div className="panel inspector-panel">
+                    <div className="panel-corner panel-corner-tl"></div>
+                    <div className="panel-corner panel-corner-tr"></div>
+                    <div className="panel-corner panel-corner-bl"></div>
+                    <div className="panel-corner panel-corner-br"></div>
+                    <h2 className="panel-title">Инспектор Агента</h2>
+                    <p style={{ textAlign: 'center', color: 'rgba(255,255,255,0.5)', padding: '40px' }}>
+                        Выберите агента для просмотра детальной информации
+                    </p>
+                </div>
+            );
 
-                        <h3>Relationships</h3>
-                        <ul>
-                            {Object.keys(agent.relationships).map(relId => {
-                                const relationship = agent.relationships[relId];
-                                return (
-                                    <li key={relId}>
-                                        Agent {relId}: Affinity {relationship.affinity.toFixed(2)}, 
-                                        Familiarity {relationship.familiarity.toFixed(2)}
-                                    </li>
-                                );
-                            })}
-                        </ul>
+            return (
+                <div className="panel inspector-panel">
+                    <div className="panel-corner panel-corner-tl"></div>
+                    <div className="panel-corner panel-corner-tr"></div>
+                    <div className="panel-corner panel-corner-bl"></div>
+                    <div className="panel-corner panel-corner-br"></div>
+                    
+                    <h2 className="panel-title">Инспектор: {agent.name}</h2>
+                    
+                    <div className="inspector-grid">
+                        <div className="inspector-section">
+                            <h3>Личность (OCEAN)</h3>
+                            {Object.entries(agent.personality).map(([trait, value]) => (
+                                <div key={trait} className="trait-row">
+                                    <span className="trait-name">
+                                        {trait === 'openness' ? 'Открытость' :
+                                         trait === 'conscientiousness' ? 'Сознательность' :
+                                         trait === 'extraversion' ? 'Экстраверсия' :
+                                         trait === 'agreeableness' ? 'Доброжелательность' :
+                                         'Нейротизм'}
+                                    </span>
+                                    <div className="trait-bar">
+                                        <div className="trait-bar-fill" style={{ width: `${value * 100}%` }}></div>
+                                    </div>
+                                    <span className="trait-value">{(value * 100).toFixed(0)}%</span>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="inspector-section">
+                            <h3>Текущие Эмоции</h3>
+                            {Object.entries(agent.emotions).map(([emotion, value]) => (
+                                <div key={emotion} className="trait-row">
+                                    <span className="trait-name">
+                                        {emotion === 'happiness' ? 'Радость' :
+                                         emotion === 'sadness' ? 'Грусть' :
+                                         emotion === 'anger' ? 'Гнев' :
+                                         emotion === 'fear' ? 'Страх' :
+                                         emotion === 'surprise' ? 'Удивление' :
+                                         'Отвращение'}
+                                    </span>
+                                    <div className="trait-bar">
+                                        <div 
+                                            className="trait-bar-fill" 
+                                            style={{ 
+                                                width: `${value * 100}%`,
+                                                background: emotionColors[emotion]
+                                            }}
+                                        ></div>
+                                    </div>
+                                    <span className="trait-value" style={{ color: emotionColors[emotion] }}>
+                                        {(value * 100).toFixed(0)}%
+                                    </span>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="inspector-section">
+                            <h3>Последние Воспоминания</h3>
+                            <div className="memory-list">
+                                {agent.memories.map((memory, idx) => (
+                                    <div key={idx} className="memory-item">
+                                        <div className="memory-time">{memory.time}</div>
+                                        {memory.content}
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="inspector-section">
+                            <h3>Отношения</h3>
+                            <div className="relationship-list">
+                                {Object.entries(agent.relationships).length === 0 ? (
+                                    <p style={{ color: 'rgba(255,255,255,0.5)' }}>Нет установленных отношений</p>
+                                ) : (
+                                    Object.entries(agent.relationships).map(([id, rel]) => (
+                                        <div key={id} className="relationship-item">
+                                            <div className="rel-agent">
+                                                <div className="rel-avatar">👤</div>
+                                                <div className="rel-info">
+                                                    <div className="rel-name">Агент {id}</div>
+                                                    <div className="rel-status">Знакомство: {(rel.familiarity * 100).toFixed(0)}%</div>
+                                                </div>
+                                            </div>
+                                            <div className={`rel-affinity ${rel.affinity > 0 ? 'positive' : rel.affinity < 0 ? 'negative' : 'neutral'}`}>
+                                                {rel.affinity > 0 ? '+' : ''}{rel.affinity.toFixed(2)}
+                                            </div>
+                                        </div>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="inspector-section">
+                            <h3>Текущий План</h3>
+                            <p style={{ fontSize: '1.1rem', color: '#00f0ff' }}>{agent.current_plan}</p>
+                            <h3 style={{ marginTop: '20px' }}>Статус</h3>
+                            <p style={{ color: '#00ff88' }}>● Активен</p>
+                        </div>
+
+                        <div className="inspector-section">
+                            <h3>Статистика</h3>
+                            <div className="trait-row">
+                                <span className="trait-name">Всего воспоминаний</span>
+                                <span className="trait-value">{agent.memory_count}</span>
+                            </div>
+                            <div className="trait-row">
+                                <span className="trait-name">Сообщений отправлено</span>
+                                <span className="trait-value">{Math.floor(Math.random() * 100)}</span>
+                            </div>
+                            <div className="trait-row">
+                                <span className="trait-name">Время активности</span>
+                                <span className="trait-value">{Math.floor(Math.random() * 24)}ч</span>
+                            </div>
+                        </div>
                     </div>
-                );
-            }
-        }
+                </div>
+            );
+        };
 
-        // Render the app
-        ReactDOM.render(<App />, document.getElementById('root'));
+        // Главный компонент приложения
+        const App = () => {
+            const [agents, setAgents] = useState([]);
+            const [events, setEvents] = useState([]);
+            const [selectedAgent, setSelectedAgent] = useState(null);
+            const [timeSpeed, setTimeSpeed] = useState(1.0);
+            const [isLoading, setIsLoading] = useState(true);
+
+            // Инициализация
+            useEffect(() => {
+                // Имитация загрузки
+                setTimeout(() => {
+                    const mockAgents = generateMockAgents();
+                    setAgents(mockAgents);
+                    
+                    // Добавляем начальные события
+                    const initialEvents = [
+                        { id: 1, text: 'Система инициализирована. 8 агентов активированы.', timestamp: new Date().toLocaleTimeString() },
+                        { id: 2, text: 'Алекса начала анализ окружения', timestamp: new Date().toLocaleTimeString() },
+                        { id: 3, text: 'Нексус отправил сообщение Кайросу', timestamp: new Date().toLocaleTimeString() }
+                    ];
+                    setEvents(initialEvents);
+                    
+                    document.getElementById('loading').classList.add('hidden');
+                    setIsLoading(false);
+                }, 1500);
+
+                // Симуляция входящих событий
+                const interval = setInterval(() => {
+                    setEvents(prev => {
+                        const newEvent = {
+                            id: Date.now(),
+                            text: generateRandomEvent(),
+                            timestamp: new Date().toLocaleTimeString()
+                        };
+                        return [newEvent, ...prev.slice(0, 49)];
+                    });
+                }, 3000);
+
+                return () => clearInterval(interval);
+            }, []);
+
+            const generateRandomEvent = () => {
+                const events = [
+                    'Алекса изменила план действий',
+                    'Нексус вспомнил прошлое событие',
+                    'Кайрос получил сообщение от Зефира',
+                    'Орион обновил эмоциональное состояние',
+                    'Луна начала новую задачу',
+                    'Титан анализирует данные',
+                    'Вега отправила широковещательное сообщение',
+                    'Групповое обсуждение началось',
+                    'Обнаружена новая информация в окружении'
+                ];
+                return events[Math.floor(Math.random() * events.length)];
+            };
+
+            const handleAddEvent = (eventDesc) => {
+                setEvents(prev => [{
+                    id: Date.now(),
+                    text: `Глобальное событие: ${eventDesc}`,
+                    timestamp: new Date().toLocaleTimeString()
+                }, ...prev]);
+            };
+
+            const handleSendMessage = (recipient, content) => {
+                const agent = agents.find(a => a.id === recipient);
+                setEvents(prev => [{
+                    id: Date.now(),
+                    text: `Сообщение от Пользователя к ${agent?.name || recipient}: ${content}`,
+                    timestamp: new Date().toLocaleTimeString()
+                }, ...prev]);
+            };
+
+            const handleSetSpeed = () => {
+                setEvents(prev => [{
+                    id: Date.now(),
+                    text: `Скорость времени изменена на ${timeSpeed}x`,
+                    timestamp: new Date().toLocaleTimeString()
+                }, ...prev]);
+            };
+
+            return (
+                <div className="container">
+                    <Header />
+                    
+                    <div className="stats-bar">
+                        <div className="stat-item">
+                            <div className="stat-value">{agents.length}</div>
+                            <div className="stat-label">Активных Агентов</div>
+                        </div>
+                        <div className="stat-item">
+                            <div className="stat-value">{events.length}</div>
+                            <div className="stat-label">Событий</div>
+                        </div>
+                        <div className="stat-item">
+                            <div className="stat-value">{timeSpeed.toFixed(1)}x</div>
+                            <div className="stat-label">Скорость Времени</div>
+                        </div>
+                        <div className="stat-item">
+                            <div className="stat-value">Online</div>
+                            <div className="stat-label">Статус Системы</div>
+                        </div>
+                    </div>
+
+                    <div className="dashboard">
+                        <div className="panel agents-panel">
+                            <div className="panel-corner panel-corner-tl"></div>
+                            <div className="panel-corner panel-corner-tr"></div>
+                            <div className="panel-corner panel-corner-bl"></div>
+                            <div className="panel-corner panel-corner-br"></div>
+                            
+                            <h2 className="panel-title">Активные Агенты</h2>
+                            <div className="agent-grid">
+                                {agents.map(agent => (
+                                    <AgentCard 
+                                        key={agent.id}
+                                        agent={agent}
+                                        isSelected={selectedAgent?.id === agent.id}
+                                        onClick={setSelectedAgent}
+                                    />
+                                ))}
+                            </div>
+                        </div>
+
+                        <ControlPanel 
+                            agents={agents}
+                            onAddEvent={handleAddEvent}
+                            onSendMessage={handleSendMessage}
+                            onSetSpeed={handleSetSpeed}
+                            timeSpeed={timeSpeed}
+                            setTimeSpeed={setTimeSpeed}
+                        />
+                    </div>
+
+                    <div className="dashboard">
+                        <EventFeed events={events} />
+                        <RelationshipGraph agents={agents} />
+                    </div>
+
+                    <AgentInspector agent={selectedAgent} />
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
     </script>
 </body>
 </html>
