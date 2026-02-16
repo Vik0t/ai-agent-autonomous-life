@@ -3,9 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List
 import json
 import asyncio
-from .agent import Agent
-from .simulator import WorldSimulator
-from .communication import Message
+from agent import Agent
+from simulator import WorldSimulator
+from communication import Message
 
 app = FastAPI(title="Cyber Hackathon - Virtual World Simulator API")
 

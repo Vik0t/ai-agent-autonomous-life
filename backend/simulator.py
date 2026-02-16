@@ -1,10 +1,10 @@
 from typing import Dict, List
 import asyncio
 import time
-from .agent import Agent
-from .communication import CommunicationHub, Message
-from .llm import LLMInterface
-from .memory import VectorMemory
+from agent import Agent
+from communication import CommunicationHub, Message
+from llm import LLMInterface
+from memory import VectorMemory
 
 class WorldSimulator:
     def __init__(self):
