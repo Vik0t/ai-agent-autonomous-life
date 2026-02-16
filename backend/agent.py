@@ -3,7 +3,7 @@ from typing import Dict, List, Any
 from pydantic import BaseModel
 from core.bdi import (
     BeliefBase, Desire, Intention, DeliberationCycle,
-    create_self_belief, BeliefType, PlanStep, ActionType
+    create_self_belief, BeliefType, PlanStep, ActionType, IntentionStatus
 )
 
 class Personality(BaseModel):
@@ -26,21 +26,16 @@ class Agent:
         self.id = agent_id
         self.name = name
         self.avatar = avatar
-        
-        # Конвертация в модель Pydantic
         self.personality = Personality(**personality_data)
         self.emotions = Emotion()
-        
         self.beliefs = BeliefBase()
         self.desires: List[Desire] = []
         self.intentions: List[Intention] = []
-        
         self.deliberation_cycle = DeliberationCycle(llm_interface=llm_interface)
         self._initialize_self_beliefs()
-        self.current_plan = "Инициализация..."
+        self.current_plan = "Ожидание..."
 
     def _initialize_self_beliefs(self):
-        from core.bdi.beliefs import create_self_belief
         self.beliefs.add_belief(create_self_belief(self.id, "name", self.name))
         self.beliefs.add_belief(create_self_belief(self.id, "location", "Центральная площадь"))
 
@@ -53,11 +48,13 @@ class Agent:
             personality=self.personality.dict(),
             emotions=self.emotions.dict(),
             perceptions=perceptions,
-            max_intentions=2
+            max_intentions=1
         )
         
         if result.get('new_intention'):
             self.current_plan = result['new_intention'].desire_description
+        elif not any(i.status == IntentionStatus.ACTIVE for i in self.intentions):
+            self.current_plan = "Обдумывание..."
 
         actions_to_perform = []
         for action_info in result['actions_to_execute']:
@@ -72,30 +69,32 @@ class Agent:
         return actions_to_perform
 
     def confirm_action_execution(self, intention_id: str, step_object: PlanStep, success: bool, message: str):
+        # 1. Обновляем статус шага
         step_object.executed = True
         step_object.success = success
-        step_object.result = {"message": message}
         
-        # Если действие было перемещением, BDI уже обновил убеждение, 
-        # но мы можем залогировать результат
+        # 2. Обновляем прогресс намерения
         for intention in self.intentions:
             if intention.id == intention_id:
                 intention.update_progress({"success": success, "message": message})
+                if intention.is_completed():
+                    intention.complete()
                 break
 
     def to_dict(self):
-        """Безопасная сериализация для фронтенда"""
-        # Достаем локацию из убеждений (Belief System)
         loc_belief = self.beliefs.get_belief(BeliefType.SELF, self.id, "location")
         current_location = loc_belief.value if loc_belief else "Неизвестно"
-
+        
         return {
-            "id": str(self.id),
-            "name": str(self.name),
-            "avatar": str(self.avatar),
+            "id": self.id,
+            "name": self.name,
+            "avatar": self.avatar,
             "personality": self.personality.dict(),
             "emotions": self.emotions.dict(),
-            "current_plan": str(self.current_plan),
-            "location": str(current_location),
-            "status": "active"
+            "current_plan": self.current_plan,
+            "location": current_location,
+            "status": "active",
+            "memory_count": len(self.beliefs.beliefs),
+            "relationships": {},
+            "memories": [] # Можно добавить из BeliefBase
         }

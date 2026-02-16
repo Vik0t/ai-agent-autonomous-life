@@ -349,28 +349,12 @@ class DesireGenerator:
         )
     
     def _has_similar_desire(self, desires: List[Desire], rule_name: str) -> bool:
-        """Проверить, есть ли уже похожее желание"""
-        # Упрощённая проверка - по ключевым словам в описании
-        keywords = {
-            'extravert_socialization': ['поговорить', 'общаться'],
-            'introvert_solitude': ['тихое', 'размышлен'],
-            'openness_exploration': ['изучить', 'новое'],
-            'agreeableness_help': ['помочь', 'помощь'],
-            'conscientiousness_organize': ['организ', 'упорядоч'],
-            'sadness_support': ['поддержк'],
-            'fear_safety': ['безопас'],
-            'happiness_share': ['поделиться', 'радост'],
-            'anger_confront': ['конфликт', 'разреш']
-        }
-        
-        rule_keywords = keywords.get(rule_name, [])
-        
+        # Теперь проверяем только те, которые ПРЯМО СЕЙЧАС в работе
+        # Это позволит создавать новые желания, как только старые выполнены
         for desire in desires:
             if desire.status in [DesireStatus.ACTIVE, DesireStatus.PURSUED]:
-                desc_lower = desire.description.lower()
-                if any(keyword in desc_lower for keyword in rule_keywords):
+                if desire.source == f"personality_{rule_name}" or desire.source == rule_name:
                     return True
-        
         return False
     
     def _generate_situational_desires(
