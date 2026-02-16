@@ -578,7 +578,8 @@ const App = () => {
     React.useEffect(() => {
         // Имитация загрузки
         setTimeout(() => {
-            const mockAgents = generateMockAgents();
+            // Используем данные из глобального состояния
+            const mockAgents = window.agentsData || generateMockAgents();
             setAgents(mockAgents);
             
             // Добавляем начальные события
@@ -632,7 +633,7 @@ const App = () => {
     };
 
     const handleSendMessage = (recipient, content) => {
-        const agent = agents.find(a => a.id === recipient);
+        const agent = window.agentsData?.find(a => a.id === recipient) || agents.find(a => a.id === recipient);
         setEvents(prev => [{
             id: Date.now(),
             text: `Сообщение от Пользователя к ${agent?.name || recipient}: ${content}`,
@@ -648,12 +649,17 @@ const App = () => {
         }, ...prev]);
     };
 
+    const handleAgentClick = (agent) => {
+        // Переключаемся на страницу профиля агента
+        window.setView('agent-profile', agent);
+    };
+
     const agentCards = agents.map(agent =>
         React.createElement(AgentCard, {
             key: agent.id,
             agent: agent,
             isSelected: selectedAgent?.id === agent.id,
-            onClick: setSelectedAgent
+            onClick: handleAgentClick
         })
     );
 
@@ -676,8 +682,120 @@ const App = () => {
         )
     ];
 
+    // Отображение страницы профиля агента
+    if (window.currentView === 'agent-profile' && window.selectedAgent) {
+        return React.createElement('div', { className: 'container' },
+            React.createElement(Header),
+            React.createElement(Navigation, {
+                currentPage: 'agent-profile',
+                onNavigate: (page) => window.setView(page)
+            }),
+            React.createElement(AgentProfile, {
+                agent: window.selectedAgent,
+                onBack: () => window.setView('agents'),
+                onSendMessage: (agentId, content) => {
+                    window.sendMessageToAgent(agentId, content);
+                    // В реальной реализации здесь будет обновление чата
+                }
+            })
+        );
+    }
+
+    // Отображение навигации и контента в зависимости от текущей страницы
+    if (window.currentView === 'agents') {
+        // Отображение списка агентов
+        return React.createElement('div', { className: 'container' },
+            React.createElement(Header),
+            React.createElement(Navigation, {
+                currentPage: 'agents',
+                onNavigate: (page) => window.setView(page)
+            }),
+            React.createElement('div', { className: 'dashboard' },
+                React.createElement('div', { className: 'panel agents-panel' },
+                    React.createElement('div', { className: 'panel-corner panel-corner-tl' }),
+                    React.createElement('div', { className: 'panel-corner panel-corner-tr' }),
+                    React.createElement('div', { className: 'panel-corner panel-corner-bl' }),
+                    React.createElement('div', { className: 'panel-corner panel-corner-br' }),
+                    
+                    React.createElement('h2', { className: 'panel-title' }, 'Активные Агенты'),
+                    React.createElement('div', { className: 'agent-grid' }, agentCards)
+                )
+            ),
+            React.createElement(AgentInspector, { agent: selectedAgent })
+        );
+    }
+    
+    // Отображение группового чата
+    if (window.currentView === 'group-chat' && window.selectedAgents.length > 0) {
+        return React.createElement('div', { className: 'container' },
+            React.createElement(Header),
+            React.createElement(Navigation, {
+                currentPage: 'group-chat',
+                onNavigate: (page) => window.setView(page)
+            }),
+            React.createElement(GroupChat, {
+                agents: window.selectedAgents,
+                onBack: () => window.setView('agents'),
+                onSendMessage: (agentId, content) => {
+                    window.sendMessageToAgent(agentId, content);
+                }
+            })
+        );
+    }
+
+    // Отображение основной панели мониторинга
+    if (window.currentView === 'dashboard') {
+        return React.createElement('div', { className: 'container' },
+            React.createElement(Header),
+            React.createElement(Navigation, {
+                currentPage: 'dashboard',
+                onNavigate: (page) => window.setView(page)
+            }),
+            
+            React.createElement('div', { className: 'stats-bar' }, statItems),
+
+            React.createElement('div', { className: 'dashboard' },
+                React.createElement('div', { className: 'panel agents-panel' },
+                    React.createElement('div', { className: 'panel-corner panel-corner-tl' }),
+                    React.createElement('div', { className: 'panel-corner panel-corner-tr' }),
+                    React.createElement('div', { className: 'panel-corner panel-corner-bl' }),
+                    React.createElement('div', { className: 'panel-corner panel-corner-br' }),
+                    
+                    React.createElement('h2', { className: 'panel-title' }, 'Активные Агенты'),
+                    React.createElement('div', { className: 'agent-grid' }, agentCards)
+                ),
+
+                React.createElement(ControlPanel, {
+                    agents: agents,
+                    onAddEvent: handleAddEvent,
+                    onSendMessage: handleSendMessage,
+                    onSetSpeed: handleSetSpeed,
+                    timeSpeed: timeSpeed,
+                    setTimeSpeed: setTimeSpeed
+                })
+            ),
+
+            React.createElement('div', { className: 'dashboard' },
+                React.createElement(EventFeed, { events: events }),
+                React.createElement(RelationshipGraph, { agents: agents })
+            ),
+            
+            React.createElement('div', { className: 'dashboard' },
+                React.createElement(InteractionHistory, { agents: agents, events: events }),
+                React.createElement(RelationshipVisualizer, { agents: agents })
+            ),
+
+            React.createElement(AgentInspector, { agent: selectedAgent })
+        );
+    }
+    
+    // Отображение основной панели мониторинга по умолчанию
     return React.createElement('div', { className: 'container' },
         React.createElement(Header),
+        React.createElement(Navigation, {
+            currentPage: 'dashboard',
+            onNavigate: (page) => window.setView(page)
+        }),
         
         React.createElement('div', { className: 'stats-bar' }, statItems),
 
@@ -705,6 +823,11 @@ const App = () => {
         React.createElement('div', { className: 'dashboard' },
             React.createElement(EventFeed, { events: events }),
             React.createElement(RelationshipGraph, { agents: agents })
+        ),
+        
+        React.createElement('div', { className: 'dashboard' },
+            React.createElement(InteractionHistory, { agents: agents, events: events }),
+            React.createElement(RelationshipVisualizer, { agents: agents })
         ),
 
         React.createElement(AgentInspector, { agent: selectedAgent })
