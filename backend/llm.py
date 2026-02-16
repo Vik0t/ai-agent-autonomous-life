@@ -1,5 +1,6 @@
-import openai
+import requests
 import os
+import json
 from typing import Dict, List
 from dotenv import load_dotenv
 
@@ -8,29 +9,40 @@ load_dotenv()
 
 class LLMInterface:
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        if self.api_key:
-            openai.api_key = self.api_key
+        self.api_key = os.getenv("OPENROUTER_API_KEY")
+        self.api_url = "https://openrouter.ai/api/v1/chat/completions"
             
     def generate_response(self, prompt: str, system_message: str = "") -> str:
         """
-        Generate a response using OpenAI GPT
+        Generate a response using OpenRouter
         """
         if not self.api_key:
             # Return a mock response if no API key is available
             return f"Mock response to: {prompt}"
             
         try:
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": system_message},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=150,
-                temperature=0.7
-            )
-            return response.choices[0].message.content.strip()
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            messages = []
+            if system_message:
+                messages.append({"role": "system", "content": system_message})
+            messages.append({"role": "user", "content": prompt})
+            
+            data = {
+                "model": "openai/gpt-3.5-turbo",
+                "messages": messages,
+                "max_tokens": 150,
+                "temperature": 0.7
+            }
+            
+            response = requests.post(self.api_url, headers=headers, json=data)
+            response.raise_for_status()
+            
+            result = response.json()
+            return result["choices"][0]["message"]["content"].strip()
         except Exception as e:
             return f"Error generating response: {str(e)}"
             

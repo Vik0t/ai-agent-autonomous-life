@@ -3,6 +3,6 @@ uvicorn
 pydantic
 numpy
 scikit-learn
-openai
+requests
 python-dotenv
 websockets
