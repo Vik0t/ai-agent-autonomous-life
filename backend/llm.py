@@ -1,86 +1,94 @@
-import requests
 import os
-import json
-from typing import Dict, List
+from typing import Dict, List, Any
 from dotenv import load_dotenv
+from openai import OpenAI
 
-# Load environment variables
+# Загружаем переменные окружения
 load_dotenv()
 
 class LLMInterface:
     def __init__(self):
+        # Используем OPENROUTER_API_KEY из вашего .env
         self.api_key = os.getenv("OPENROUTER_API_KEY")
-        self.api_url = "https://openrouter.ai/api/v1/chat/completions"
-            
-    def generate_response(self, prompt: str, system_message: str = "") -> str:
-        """
-        Generate a response using OpenRouter
-        """
+        
         if not self.api_key:
-            # Return a mock response if no API key is available
-            return f"Mock response to: {prompt}"
-            
+            # Проверка на случай, если ключ все еще лежит в OPENAI_API_KEY
+            self.api_key = os.getenv("OPENAI_API_KEY")
+
+        if not self.api_key:
+            print("⚠️ WARNING: No API Key found in .env (expected OPENROUTER_API_KEY)")
+            self.client = None
+        else:
+            # Настройка клиента OpenAI для работы через OpenRouter
+            self.client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=self.api_key,
+                # OpenRouter требует эти заголовки для корректного отображения в их статистике (опционально)
+                default_headers={
+                    "HTTP-Referer": "http://localhost:8000", # Ваш URL
+                    "X-Title": "Cyber Hackathon Simulator",
+                }
+            )
+
+    def _format_personality(self, personality: Dict[str, float]) -> str:
+        """Форматирование личности для промпта"""
+        return f"""
+        - Openness: {personality.get('openness', 0.5):.2f}
+        - Conscientiousness: {personality.get('conscientiousness', 0.5):.2f}
+        - Extraversion: {personality.get('extraversion', 0.5):.2f}
+        - Agreeableness: {personality.get('agreeableness', 0.5):.2f}
+        - Neuroticism: {personality.get('neuroticism', 0.5):.2f}
+        """
+
+    def generate_response(self, prompt: str, system_message: str = "") -> str:
+        if not self.client:
+            return f"[MOCK] No API Key. Response to: {prompt[:20]}..."
+
         try:
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            messages = []
-            if system_message:
-                messages.append({"role": "system", "content": system_message})
-            messages.append({"role": "user", "content": prompt})
-            
-            data = {
-                "model": "openai/gpt-3.5-turbo",
-                "messages": messages,
-                "max_tokens": 150,
-                "temperature": 0.7
-            }
-            
-            response = requests.post(self.api_url, headers=headers, json=data)
-            response.raise_for_status()
-            
-            result = response.json()
-            return result["choices"][0]["message"]["content"].strip()
+            # Важно: для OpenRouter нужно указывать модель с префиксом (например, openai/gpt-3.5-turbo)
+            response = self.client.chat.completions.create(
+                model="openai/gpt-3.5-turbo", # Или "google/gemini-flash-1.5" - они быстрые
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=150,
+                temperature=0.8,
+            )
+            return response.choices[0].message.content.strip()
         except Exception as e:
-            return f"Error generating response: {str(e)}"
-            
-    def generate_plan(self, agent_personality: Dict, current_situation: str) -> str:
-        """
-        Generate a plan for an agent based on their personality and current situation
-        """
+            print(f"🔴 OpenRouter Error: {e}")
+            return "..."
+
+    def generate_plan(self, agent_name: str, personality: Dict, beliefs: str, desires: str) -> str:
+        traits = self._format_personality(personality)
+        system_msg = f"You are {agent_name}, a character in a virtual world. Act according to your traits."
+        
         prompt = f"""
-        You are an AI agent with the following personality traits:
-        - Openness: {agent_personality['openness']}
-        - Conscientiousness: {agent_personality['conscientiousness']}
-        - Extraversion: {agent_personality['extraversion']}
-        - Agreeableness: {agent_personality['agreeableness']}
-        - Neuroticism: {agent_personality['neuroticism']}
-        
-        Current situation: {current_situation}
-        
-        Generate a short plan of action for this agent.
+        PERSONALITY:
+        {traits}
+
+        BELIEFS:
+        {beliefs}
+
+        DESIRES:
+        {desires}
+
+        TASK:
+        Describe your next action in 1 short sentence. Start with 'I will'.
         """
+        return self.generate_response(prompt, system_msg)
+
+    def generate_dialogue(self, agent_name: str, personality: Dict, context: str, incoming_message: str = "") -> str:
+        traits = self._format_personality(personality)
+        system_msg = f"You are {agent_name}. Personality: {traits}. Keep it short and conversational."
         
-        return self.generate_response(prompt, "You are an AI agent planner.")
-        
-    def generate_dialogue(self, agent_personality: Dict, context: str, other_agent_message: str = "") -> str:
-        """
-        Generate dialogue for an agent based on their personality and context
-        """
         prompt = f"""
-        You are an AI agent with the following personality traits:
-        - Openness: {agent_personality['openness']}
-        - Conscientiousness: {agent_personality['conscientiousness']}
-        - Extraversion: {agent_personality['extraversion']}
-        - Agreeableness: {agent_personality['agreeableness']}
-        - Neuroticism: {agent_personality['neuroticism']}
+        CONTEXT:
+        {context}
         
-        Context: {context}
-        {f"Other agent says: {other_agent_message}" if other_agent_message else ""}
-        
-        Generate a short response in the style of this agent.
+        {f"THEY SAID: '{incoming_message}'" if incoming_message else "Start a conversation."}
+
+        Respond in character (max 2 sentences):
         """
-        
-        return self.generate_response(prompt, "You are an AI agent in a conversation.")
+        return self.generate_response(prompt, system_msg)

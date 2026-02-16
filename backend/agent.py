@@ -1,6 +1,10 @@
+# backend/agent.py
+from typing import Dict, List, Any
 from pydantic import BaseModel
-from typing import Dict, List
-import numpy as np
+from core.bdi import (
+    BeliefBase, Desire, Intention, DeliberationCycle,
+    create_self_belief, BeliefType, PlanStep, ActionType
+)
 
 class Personality(BaseModel):
     openness: float
@@ -10,78 +14,88 @@ class Personality(BaseModel):
     neuroticism: float
 
 class Emotion(BaseModel):
-    happiness: float
-    sadness: float
-    anger: float
-    fear: float
-    surprise: float
-    disgust: float
-
-class Memory(BaseModel):
-    id: str
-    content: str
-    timestamp: float
-    importance: float
-
-class Relationship(BaseModel):
-    agent_id: str
-    affinity: float
-    familiarity: float
-    last_interaction: float
+    happiness: float = 0.5
+    sadness: float = 0.0
+    anger: float = 0.0
+    fear: float = 0.0
+    surprise: float = 0.0
+    disgust: float = 0.0
 
 class Agent:
-    def __init__(self, agent_id: str, name: str):
+    def __init__(self, agent_id: str, name: str, avatar: str, personality_data: Dict, llm_interface=None):
         self.id = agent_id
         self.name = name
-        self.personality = Personality(
-            openness=0.5,
-            conscientiousness=0.5,
-            extraversion=0.5,
-            agreeableness=0.5,
-            neuroticism=0.5
-        )
-        self.emotions = Emotion(
-            happiness=0.5,
-            sadness=0.0,
-            anger=0.0,
-            fear=0.0,
-            surprise=0.0,
-            disgust=0.0
-        )
-        self.memories: List[Memory] = []
-        self.relationships: Dict[str, Relationship] = {}
-        self.current_plan = ""
+        self.avatar = avatar
         
-    def update_emotions(self, event: str):
-        # Simple emotion update based on event
-        if "happy" in event.lower():
-            self.emotions.happiness = min(1.0, self.emotions.happiness + 0.1)
-        elif "sad" in event.lower():
-            self.emotions.sadness = min(1.0, self.emotions.sadness + 0.1)
-        elif "angry" in event.lower():
-            self.emotions.anger = min(1.0, self.emotions.anger + 0.1)
-            
-    def add_memory(self, content: str, importance: float = 0.5):
-        memory = Memory(
-            id=str(len(self.memories)),
-            content=content,
-            timestamp=len(self.memories),
-            importance=importance
+        # Конвертация в модель Pydantic
+        self.personality = Personality(**personality_data)
+        self.emotions = Emotion()
+        
+        self.beliefs = BeliefBase()
+        self.desires: List[Desire] = []
+        self.intentions: List[Intention] = []
+        
+        self.deliberation_cycle = DeliberationCycle(llm_interface=llm_interface)
+        self._initialize_self_beliefs()
+        self.current_plan = "Инициализация..."
+
+    def _initialize_self_beliefs(self):
+        from core.bdi.beliefs import create_self_belief
+        self.beliefs.add_belief(create_self_belief(self.id, "name", self.name))
+        self.beliefs.add_belief(create_self_belief(self.id, "location", "Центральная площадь"))
+
+    def think(self, perceptions: List[Dict[str, Any]]) -> List[Dict]:
+        result = self.deliberation_cycle.run_cycle(
+            agent_id=self.id,
+            beliefs=self.beliefs,
+            desires=self.desires,
+            intentions=self.intentions,
+            personality=self.personality.dict(),
+            emotions=self.emotions.dict(),
+            perceptions=perceptions,
+            max_intentions=2
         )
-        self.memories.append(memory)
         
-    def get_relationship(self, agent_id: str) -> Relationship:
-        if agent_id not in self.relationships:
-            self.relationships[agent_id] = Relationship(
-                agent_id=agent_id,
-                affinity=0.0,
-                familiarity=0.0,
-                last_interaction=0.0
-            )
-        return self.relationships[agent_id]
+        if result.get('new_intention'):
+            self.current_plan = result['new_intention'].desire_description
+
+        actions_to_perform = []
+        for action_info in result['actions_to_execute']:
+            action: PlanStep = action_info['action']
+            actions_to_perform.append({
+                "agent_id": self.id,
+                "action_type": action.action_type.value,
+                "params": action.parameters,
+                "intention_id": action_info['intention_id'],
+                "step_object": action 
+            })
+        return actions_to_perform
+
+    def confirm_action_execution(self, intention_id: str, step_object: PlanStep, success: bool, message: str):
+        step_object.executed = True
+        step_object.success = success
+        step_object.result = {"message": message}
         
-    def update_relationship(self, agent_id: str, affinity_change: float, familiarity_change: float):
-        relationship = self.get_relationship(agent_id)
-        relationship.affinity = np.clip(relationship.affinity + affinity_change, -1.0, 1.0)
-        relationship.familiarity = np.clip(relationship.familiarity + familiarity_change, 0.0, 1.0)
-        relationship.last_interaction = len(self.memories)
+        # Если действие было перемещением, BDI уже обновил убеждение, 
+        # но мы можем залогировать результат
+        for intention in self.intentions:
+            if intention.id == intention_id:
+                intention.update_progress({"success": success, "message": message})
+                break
+
+    def to_dict(self):
+        """Безопасная сериализация для фронтенда"""
+        # Достаем локацию из убеждений (Belief System)
+        loc_belief = self.beliefs.get_belief(BeliefType.SELF, self.id, "location")
+        current_location = loc_belief.value if loc_belief else "Неизвестно"
+
+        return {
+            "id": str(self.id),
+            "name": str(self.name),
+            "avatar": str(self.avatar),
+            "personality": self.personality.dict(),
+            "emotions": self.emotions.dict(),
+            "current_plan": str(self.current_plan),
+            "location": str(current_location),
+            "status": "active"
+        }
