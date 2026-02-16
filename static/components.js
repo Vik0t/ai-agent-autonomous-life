@@ -700,6 +700,34 @@ const App = () => {
             })
         );
     }
+    
+    // Отображение страницы чатов
+    if (window.currentView === 'chat') {
+        return React.createElement('div', { className: 'container' },
+            React.createElement(Header),
+            React.createElement(Navigation, {
+                currentPage: 'chat',
+                onNavigate: (page) => window.setView(page)
+            }),
+            React.createElement(ChatView, {
+                onBack: () => window.setView('dashboard')
+            })
+        );
+    }
+    
+    // Отображение страницы аналитики
+    if (window.currentView === 'analytics') {
+        return React.createElement('div', { className: 'container' },
+            React.createElement(Header),
+            React.createElement(Navigation, {
+                currentPage: 'analytics',
+                onNavigate: (page) => window.setView(page)
+            }),
+            React.createElement(Analytics, {
+                onBack: () => window.setView('dashboard')
+            })
+        );
+    }
 
     // Отображение навигации и контента в зависимости от текущей страницы
     if (window.currentView === 'agents') {
