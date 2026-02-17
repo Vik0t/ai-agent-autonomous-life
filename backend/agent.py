@@ -101,6 +101,11 @@ class Agent:
         step_object.executed = True
         step_object.success = success
 
+        SOCIAL_SOURCES = {
+            'incoming_message', 'personality_extraversion', 'personality_agreeableness',
+            'emotion_happiness', 'emotion_sadness'
+        }
+
         for intention in self.intentions:
             if intention.id == intention_id:
                 intention.update_progress({"success": success, "message": message})
@@ -112,6 +117,14 @@ class Agent:
                     for desire in self.desires:
                         if desire.id == intention.desire_id:
                             desire.status = DesireStatus.ACHIEVED
+
+                            # Автоматически засчитываем solo при завершении несоц. намерения.
+                            # Это страховка: даже если симулятор не вызвал notify_solo_action
+                            # пошагово (напр. для idle/think/learn планов), счётчик двигается.
+                            if desire.source not in SOCIAL_SOURCES:
+                                self.deliberation_cycle.notify_solo_action(
+                                    desire.source or 'idle_drive'
+                                )
                             break
                 break
 
@@ -121,6 +134,13 @@ class Agent:
         Это активирует кулдаун в DesireGenerator — не создавать respond_desires 30 сек.
         """
         self.deliberation_cycle.notify_conversation_ended(partner_id)
+
+    def notify_solo_action(self, action_type: str):
+        """
+        Social Satiety: уведомить BDI что выполнено несоциальное действие.
+        После MIN_SOLO_ACTIONS действий снимает блок на новые социальные желания.
+        """
+        self.deliberation_cycle.notify_solo_action(action_type)
 
     def to_dict(self):
         loc_belief = self.beliefs.get_belief(BeliefType.SELF, self.id, "location")

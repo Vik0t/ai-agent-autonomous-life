@@ -52,6 +52,11 @@ class Intention:
     # Метрики
     actual_duration: float = 0.0
     retry_count: int = 0
+
+    # Прерываемость: рутинные действия (think/move/observe) можно приостановить
+    # если пришло срочное социальное событие (incoming_message).
+    # Социальные намерения (respond, initiate) — НЕ прерываемы.
+    interruptible: bool = True
     
     def update_progress(self, step_result: Dict[str, Any]) -> None:
         """
@@ -148,7 +153,8 @@ class Intention:
             'context': self.context,
             'execution_log': self.execution_log,
             'actual_duration': self.actual_duration,
-            'retry_count': self.retry_count
+            'retry_count': self.retry_count,
+            'interruptible': self.interruptible
         }
     
     @classmethod
@@ -172,7 +178,8 @@ class Intention:
             context=data.get('context', {}),
             execution_log=data.get('execution_log', []),
             actual_duration=data.get('actual_duration', 0.0),
-            retry_count=data.get('retry_count', 0)
+            retry_count=data.get('retry_count', 0),
+            interruptible=data.get('interruptible', True)
         )
     
     def __repr__(self):
@@ -276,6 +283,28 @@ class IntentionSelector:
     def _select_by_urgency(self, desires: List) -> Any:
         """Выбрать самое срочное желание"""
         return max(desires, key=lambda d: d.urgency)
+
+    def interrupt_for_social(
+        self,
+        intentions: List[Intention],
+        urgent_desire
+    ) -> List[Intention]:
+        """
+        Реактивное прерывание: если пришло срочное социальное желание
+        (источник incoming_message), приостановить все прерываемые намерения.
+
+        Возвращает список приостановленных намерений (для логирования).
+        """
+        from .desires import MotivationType
+        suspended = []
+        for intention in intentions:
+            if (intention.status == IntentionStatus.ACTIVE
+                    and intention.interruptible):
+                intention.suspend(
+                    reason=f"Прерван срочным: {urgent_desire.description[:40]}"
+                )
+                suspended.append(intention)
+        return suspended
     
     def should_reconsider_intentions(
         self,
@@ -347,13 +376,21 @@ class IntentionSelector:
 
 def create_intention_from_desire(desire, plan) -> Intention:
     """Создать намерение из желания и плана"""
+    # Социальные намерения (ответ на сообщение, инициация) — не прерываемы.
+    # Рутинные (think, move, observe, learn) — прерываемы.
+    SOCIAL_SOURCES = {'incoming_message', 'personality_extraversion',
+                      'personality_agreeableness', 'emotion_happiness', 'emotion_sadness'}
+    is_social = getattr(desire, 'source', '') in SOCIAL_SOURCES
+    interruptible = not is_social
+
     return Intention(
         desire_id=desire.id,
         desire_description=desire.description,
         plan=plan,
         priority=desire.priority,
         status=IntentionStatus.ACTIVE,
-        context=desire.context.copy() if hasattr(desire, 'context') else {}
+        context=desire.context.copy() if hasattr(desire, 'context') else {},
+        interruptible=interruptible
     )
 
 

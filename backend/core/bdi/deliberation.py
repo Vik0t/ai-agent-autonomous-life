@@ -1,17 +1,20 @@
-# deliberation.py  [v4 — финальный рефакторинг]
+# deliberation.py  [v6 — Reactive Interrupts + Idle Drive]
 """
-Исправления:
-1. _cleanup_desires получает intentions и освобождает PURSUED desires
-   чьи намерения завершились — без этого список desires рос и блокировал новые.
+Изменения v6:
+1. _cleanup_desires освобождает PURSUED desires чьи намерения завершились.
 2. Передача active_conversation_partners в generate_desires.
-3. notify_conversation_ended проксируется в desire_generator.
+3. notify_conversation_ended → desire_generator.
+4. notify_solo_action() — для Social Satiety счётчика.
+5. [NEW] Реактивное прерывание: incoming_message приостанавливает рутинные намерения.
+6. [NEW] Восстановление SUSPENDED намерений после завершения ответа.
+7. [NEW] Страховочный Idle Drive через deliberation если desires.py его не сгенерировал.
 """
 
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 
 from .beliefs import BeliefBase, Belief, BeliefType
-from .desires import Desire, DesireGenerator, DesireStatus
+from .desires import Desire, DesireGenerator, DesireStatus, MotivationType
 from .intentions import Intention, IntentionSelector, IntentionStatus, create_intention_from_desire
 from .plans import Planner
 
@@ -71,7 +74,63 @@ class DeliberationCycle:
         )
         desires.extend(new_desires)
 
-        # ── 4. Intention selection ───────────────────────────────────
+        # ── 3b. Страховочный Idle Drive ──────────────────────────────
+        # Если нет ни одного активного/pursued несоциального желания
+        # И нет активных/suspended намерений — агент в тупике. Вставляем idle.
+        # Idle засчитывается как solo ТОЛЬКО после реального выполнения шага
+        # (через notify_solo_action в simulator — не авансом).
+        has_any_nonsocial = any(
+            d.status in [DesireStatus.ACTIVE, DesireStatus.PURSUED]
+            and d.motivation_type != MotivationType.SOCIAL
+            for d in desires
+        )
+        has_active_intention = any(
+            i.status in [IntentionStatus.ACTIVE, IntentionStatus.SUSPENDED]
+            for i in intentions
+        )
+        if not has_any_nonsocial and not has_active_intention:
+            idle = self.desire_generator._generate_idle_desire(agent_id, personality)
+            # Не дублируем если такой idle уже есть
+            already_idle = any(
+                d.description == idle.description
+                and d.status in [DesireStatus.ACTIVE, DesireStatus.PURSUED]
+                for d in desires
+            )
+            if not already_idle:
+                desires.append(idle)
+                new_desires.append(idle)
+                print(f"💤 [{agent_id}] Страховочный Idle Drive: «{idle.description}»")
+
+        # ── 4. Реактивное прерывание ─────────────────────────────────
+        # Если пришло СРОЧНОЕ социальное желание (incoming_message),
+        # немедленно приостанавливаем прерываемые рутинные намерения.
+        urgent_social = next(
+            (d for d in desires
+             if d.source == 'incoming_message' and d.status == DesireStatus.ACTIVE),
+            None
+        )
+        suspended_now = []
+        if urgent_social:
+            # Прерываем только если нет уже активного НЕСОЦИАЛЬНОГО (!) намерения
+            # отвечающего на входящее — т.е. мы ещё не начали обрабатывать этот запрос.
+            # interruptible=False означает "социальное/важное" — его НЕ прерываем.
+            # Прерываем только interruptible=True (рутина: think/move/observe/learn).
+            target_agent = urgent_social.context.get('target_agent')
+            already_responding = any(
+                i.status == IntentionStatus.ACTIVE
+                and not i.interruptible  # это уже социальное намерение
+                for i in intentions
+            )
+            if not already_responding:
+                suspended_now = self.intention_selector.interrupt_for_social(
+                    intentions, urgent_social
+                )
+                if suspended_now:
+                    print(f"⚡ [{agent_id}] Прерывание для ответа «{urgent_social.description}» "
+                          f"→ пауза {len(suspended_now)} намерений: "
+                          f"{[i.desire_description[:25] for i in suspended_now]}")
+
+        # ── 5. Intention selection ───────────────────────────────────
         new_intention = None
         has_active = any(i.status == IntentionStatus.ACTIVE for i in intentions)
 
@@ -87,8 +146,21 @@ class DeliberationCycle:
                 new_intention = create_intention_from_desire(selected, plan)
                 intentions.append(new_intention)
                 selected.status = DesireStatus.PURSUED
+            else:
+                # Нет новых кандидатов — проверяем: можно ли возобновить приостановленные?
+                # Возобновляем только если нет активных (тем более социальных) намерений.
+                has_any_active_or_social_desire = any(
+                    d.source == 'incoming_message' and d.status == DesireStatus.ACTIVE
+                    for d in desires
+                )
+                if not has_any_active_or_social_desire:
+                    for intention in intentions:
+                        if intention.status == IntentionStatus.SUSPENDED:
+                            intention.resume()
+                            print(f"▶ [{agent_id}] Возобновлено: "
+                                  f"«{intention.desire_description[:40]}»")
 
-        # ── 5. Execution ─────────────────────────────────────────────
+        # ── 6. Execution ─────────────────────────────────────────────
         actions_to_execute = []
         for intention in [i for i in intentions if i.status == IntentionStatus.ACTIVE]:
             action = intention.get_current_action()
@@ -100,7 +172,6 @@ class DeliberationCycle:
                 })
 
         self.last_cycle_time = datetime.now()
-        self.cycle_count += 0  # just reference
 
         return {
             'new_beliefs': new_beliefs,
@@ -111,9 +182,13 @@ class DeliberationCycle:
             'cycle_info': {
                 'cycle_number': self.cycle_count,
                 'duration_seconds': (datetime.now() - cycle_start).total_seconds(),
-                'active_intentions_count': sum(1 for i in intentions if i.status == IntentionStatus.ACTIVE),
+                'active_intentions_count': sum(1 for i in intentions
+                                               if i.status == IntentionStatus.ACTIVE),
+                'suspended_count': sum(1 for i in intentions
+                                       if i.status == IntentionStatus.SUSPENDED),
                 'total_desires': len(desires),
-                'total_beliefs': len(beliefs)
+                'total_beliefs': len(beliefs),
+                'interrupted': len(suspended_now),
             }
         }
 
@@ -185,6 +260,17 @@ class DeliberationCycle:
     def notify_conversation_ended(self, partner_id: str):
         """Симулятор вызывает это чтобы активировать кулдаун в desire_generator."""
         self.desire_generator.mark_conversation_ended(partner_id)
+
+    def notify_solo_action(self, action_type: str):
+        """
+        Симулятор вызывает это после каждого несоциального действия агента.
+        Продвигает счётчик Social Satiety — после MIN_SOLO_ACTIONS разблокирует социальность.
+        """
+        self.desire_generator.mark_solo_action(action_type)
+        count = self.desire_generator._solo_actions_after_conversation
+        needed = self.desire_generator.MIN_SOLO_ACTIONS
+        if count <= needed:
+            print(f"🔨 Solo action «{action_type}»: {count}/{needed} до разблокировки соц.")
 
     def get_statistics(self) -> Dict[str, Any]:
         return {

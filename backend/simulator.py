@@ -119,6 +119,15 @@ class WorldSimulator:
                 perceptions=perceptions,
                 active_conversation_partners=active_partners
             )
+            if not actions:
+                # Агент не выполняет действий — логируем idle
+                has_suspended = any(
+                    i.status.value == 'suspended' for i in agent.intentions
+                )
+                if has_suspended:
+                    print(f"⏸️  {agent.name}: ожидает завершения ответа (намерения приостановлены)")
+                else:
+                    print(f"💤 {agent.name}: idle — нет действий в этом тике")
             for cmd in actions:
                 print(f"⚡ {agent.name} executing: {cmd['action_type']} | {cmd['params']}")
                 await self._execute_agent_action(agent, cmd)
@@ -192,10 +201,15 @@ class WorldSimulator:
                 self._log_event("move", f"{agent.name} → {dest}", [agent.id])
                 agent.confirm_action_execution(
                     command['intention_id'], command['step_object'], True, f"Moved to {dest}")
+                # Solo Satiety: засчитываем индивидуальное действие
+                agent.deliberation_cycle.notify_solo_action("move")
             elif action_type in ("think", "observe", "search", "communicate",
                                  "wait", "help", "request", "give", "use", "acquire", "express"):
                 agent.confirm_action_execution(
                     command['intention_id'], command['step_object'], True, f"Done: {action_type}")
+                # Solo Satiety: засчитываем индивидуальные действия (кроме communicate)
+                if action_type != "communicate":
+                    agent.deliberation_cycle.notify_solo_action(action_type)
             else:
                 print(f"⚠️  Unknown action: {action_type}")
                 agent.confirm_action_execution(
@@ -215,6 +229,35 @@ class WorldSimulator:
         if not target_id or target_id not in self.agents:
             agent.confirm_action_execution(
                 command['intention_id'], command['step_object'], False, f"Unknown: {target_id}")
+            return
+
+        # ── Context Awareness: проверяем кулдаун цели и собственный соц. блок ──
+        dg = agent.deliberation_cycle.desire_generator
+        if dg.is_on_cooldown(target_id):
+            tname = self.agents[target_id].name
+            print(f"🚫 {agent.name}: {tname} на кулдауне — отменяем initiate_conversation")
+            # Перематываем план к концу — разговор не нужен
+            for intention in agent.intentions:
+                if intention.id == command['intention_id'] and intention.plan:
+                    intention.plan.skip_to_end_conversation(intention.current_step)
+                    intention.current_step = len(intention.plan.steps)  # завершаем план
+                    break
+            agent.confirm_action_execution(
+                command['intention_id'], command['step_object'], False,
+                f"Target {target_id} is on cooldown — conversation aborted")
+            return
+
+        if dg.is_globally_social_blocked():
+            print(f"🚫 {agent.name}: соц. блок [{dg.get_social_block_reason()}] — "
+                  f"отменяем initiate_conversation")
+            for intention in agent.intentions:
+                if intention.id == command['intention_id'] and intention.plan:
+                    intention.plan.skip_to_end_conversation(intention.current_step)
+                    intention.current_step = len(intention.plan.steps)
+                    break
+            agent.confirm_action_execution(
+                command['intention_id'], command['step_object'], False,
+                "Social block active — conversation aborted")
             return
 
         existing = self.communication_hub.get_active_conversation(agent.id, target_id)
@@ -259,7 +302,21 @@ class WorldSimulator:
         # ============================================
         conv = self.communication_hub.get_active_conversation(agent.id, target_id)
         if not conv:
-            conv = self.communication_hub.start_conversation(agent.id, target_id, topic or "general")
+            # Разговор уже завершён (собеседник вызвал end_conversation раньше нас).
+            # Не отправляем сообщения в пустоту — сразу завершаем шаг как «ненужный».
+            tname = self.agents[target_id].name
+            print(f"🚫 {agent.name}: разговор с {tname} уже закрыт — "
+                  f"пропускаем [{msg_type_str}] (не монологим)")
+            # Перематываем план к end_conversation чтобы подчистить намерение
+            for intention in agent.intentions:
+                if intention.id == command['intention_id'] and intention.plan:
+                    new_idx = intention.plan.skip_to_end_conversation(intention.current_step)
+                    intention.current_step = new_idx
+                    break
+            agent.confirm_action_execution(
+                command['intention_id'], command['step_object'], True,
+                f"Skipped [{msg_type_str}] — conversation already closed")
+            return
 
         ctx_msgs = conv.get_context_for_agent(agent.id, max_messages=5)
 
@@ -412,19 +469,41 @@ class WorldSimulator:
 
     async def _do_wait(self, agent: Agent, params: Dict, command: Dict):
         expected_from = params.get("expected_from")
+        on_timeout = params.get("on_timeout", "end")  # "end" или "continue"
+        # Позволяем плану задать своё число тиков ожидания (для ответчика — больше)
+        max_ticks = int(params.get("max_ticks", self.MAX_WAIT_TICKS))
         intention_id = command['intention_id']
 
-        response = next(
-            (m for m in self._tick_messages.get(agent.id, []) if m.sender_id == expected_from),
-            None
-        )
+        # Ищем любое сообщение от ожидаемого агента в этом тике
+        incoming_msgs = [
+            m for m in self._tick_messages.get(agent.id, [])
+            if m.sender_id == expected_from
+        ]
+        response = incoming_msgs[0] if incoming_msgs else None
 
         if response:
-            print(f"✅ {agent.name} получил ожидаемый ответ от {expected_from}: {response.content[:60]}")
+            msg_type = response.message_type.value
+            # Farewell = собеседник прощается → сразу END, не ждём
+            if msg_type in ('farewell', 'ack'):
+                print(f"👋 {agent.name}: получил [{msg_type}] от {expected_from} → END")
+                for intention in agent.intentions:
+                    if intention.id == intention_id and intention.plan:
+                        new_idx = intention.plan.skip_to_end_conversation(intention.current_step)
+                        intention.current_step = new_idx
+                        break
+                self._wait_tick_counters.pop(intention_id, None)
+                agent.confirm_action_execution(
+                    command['intention_id'], command['step_object'], True,
+                    f"Got farewell from {expected_from} — ending")
+                return
+
+            # Нормальный ответ — фиксируем и продолжаем план
+            print(f"✅ {agent.name} получил ожидаемый ответ от {expected_from}: "
+                  f"{response.content[:60]}")
             agent.beliefs.add_belief(Belief(
                 type=BeliefType.EVENT, subject=f"reply_{response.id}", key="received",
                 value={"from": response.sender_id, "content": response.content,
-                       "type": response.message_type.value},
+                       "type": msg_type},
                 confidence=1.0
             ))
             self._wait_tick_counters.pop(intention_id, None)
@@ -434,13 +513,44 @@ class WorldSimulator:
         else:
             self._wait_tick_counters[intention_id] += 1
             ticks = self._wait_tick_counters[intention_id]
-            if ticks >= self.MAX_WAIT_TICKS:
-                print(f"⏱️  {agent.name}: timeout ({ticks} тиков) от {expected_from} — продолжаем")
+            if ticks >= max_ticks:
+                # Фикс Race Condition: перед перемоткой делаем финальный взгляд в inbox.
+                # Сообщение могло прийти в самом конце тика — не хотим его пропустить.
+                late_msg = next(
+                    (m for m in self._tick_messages.get(agent.id, [])
+                     if m.sender_id == expected_from),
+                    None
+                )
+                if late_msg and late_msg.message_type.value not in ('farewell', 'ack'):
+                    print(f"⏱️→✅ {agent.name}: поймал запоздалый ответ от {expected_from}!")
+                    self._wait_tick_counters.pop(intention_id, None)
+                    agent.confirm_action_execution(
+                        command['intention_id'], command['step_object'], True,
+                        f"Late reply caught: {late_msg.content[:50]}")
+                    return
+
+                print(f"⏱️  {agent.name}: timeout ({ticks} тиков) от {expected_from} → "
+                      f"{'END' if on_timeout == 'end' else 'continue'}")
                 self._wait_tick_counters.pop(intention_id, None)
-                agent.confirm_action_execution(
-                    command['intention_id'], command['step_object'], True, "Timeout — continuing")
+
+                if on_timeout == "end":
+                    # Перематываем к END_CONVERSATION (не монологим)
+                    for intention in agent.intentions:
+                        if intention.id == intention_id and intention.plan:
+                            new_idx = intention.plan.skip_to_end_conversation(intention.current_step)
+                            intention.current_step = new_idx
+                            break
+                    agent.confirm_action_execution(
+                        command['intention_id'], command['step_object'], True,
+                        "Timeout — skipped to end_conversation")
+                else:
+                    # continue: передаём управление дальше по плану
+                    agent.confirm_action_execution(
+                        command['intention_id'], command['step_object'], True,
+                        "Timeout — continuing plan")
             else:
-                print(f"⏳ {agent.name}: ждёт от {expected_from} (тик {ticks}/{self.MAX_WAIT_TICKS})")
+                print(f"⏳ {agent.name}: ждёт от {expected_from} "
+                      f"(тик {ticks}/{max_ticks})")
 
     async def _do_end(self, agent: Agent, params: Dict, command: Dict):
         target_id = params.get("target")
@@ -455,10 +565,13 @@ class WorldSimulator:
                             [agent.id, target_id])
             agent.beliefs.remove_belief(BeliefType.SELF, agent.id, "current_conversation")
 
-            # FIX: Уведомляем ОБОИХ агентов — кулдаун в desire_generator
+            # Уведомляем ОБОИХ агентов — запускает кулдаун в DesireGenerator
+            # (вызывается НЕМЕДЛЕННО, до следующего тика)
             agent.notify_conversation_ended(target_id)
+            print(f"⏸️  {agent.name}: кулдаун соц. желаний запущен (≥{agent.deliberation_cycle.desire_generator.min_rest_ticks} тиков)")
             if target_id in self.agents:
                 self.agents[target_id].notify_conversation_ended(agent.id)
+                print(f"⏸️  {tname}: кулдаун соц. желаний запущен")
 
         agent.confirm_action_execution(
             command['intention_id'], command['step_object'], True, "Conversation ended")

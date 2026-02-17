@@ -6,6 +6,7 @@ Cyber BDI Simulator с полной базой данных и Social Engine
 import os
 import sys
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -169,7 +170,27 @@ async def websocket_endpoint(websocket: WebSocket):
         })
         await websocket.send_json(init_data)
         while True:
-            await websocket.receive_text()
+            data = await websocket.receive_json()
+            # Handle messages from frontend
+            if data.get('type') == 'send_message':
+                # Send message to agent
+                msg = Message(
+                    sender_id=data.get('sender_id', 'user'),
+                    receiver_id=data['receiver_id'],
+                    content=data['content'],
+                    topic=data.get('topic', 'user_input')
+                )
+                await simulator.communication_hub.send_message(msg)
+                simulator._log_event(
+                    "user_message",
+                    f"Пользователь → {data['receiver_id']}: {data['content'][:60]}",
+                    [data['receiver_id']],
+                    {"content": data['content']}
+                )
+            elif data.get('type') == 'add_event':
+                # Add global event
+                event_desc = data.get('event_description', 'Global Event')
+                simulator._log_event("user_event", f"Событие: {event_desc}", list(simulator.agents.keys()))
     except WebSocketDisconnect:
         if websocket in active_connections:
             active_connections.remove(websocket)
@@ -222,6 +243,33 @@ async def inject_message(agent_id: str, data: dict = Body(...), db: Database = D
     """Ввести сообщение агенту."""
     # TODO: Интеграция с simulator
     return {"status": "injected"}
+
+@app.post("/api/agents")
+async def create_agent(data: dict = Body(...)):
+    """Создать нового агента."""
+    try:
+        agent_id = f"agent-{int(time.time() * 1000)}"
+        name = data.get("name", f"Агент-{agent_id[-4:]}")
+        avatar = data.get("avatar", "🤖")
+        personality = data.get("personality", {
+            "openness": 0.5,
+            "conscientiousness": 0.5,
+            "extraversion": 0.5,
+            "agreeableness": 0.5,
+            "neuroticism": 0.5
+        })
+
+        # Создаем нового агента
+        agent = Agent(agent_id, name, avatar, personality, llm_interface=simulator.llm_interface)
+        simulator.add_agent(agent)
+
+        # Регистрируем агента в системе коммуникации
+        simulator.communication_hub.register_agent(agent_id)
+
+        return {"status": "ok", "agent": agent.to_dict()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}, 400
+
 
 @app.post("/api/control/speed")
 async def set_speed(data: dict = Body(...)):

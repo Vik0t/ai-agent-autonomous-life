@@ -50,9 +50,12 @@ class PlanStep:
     success: bool = False
     actual_duration: float = 0.0
     result: Dict[str, Any] = field(default_factory=dict)
+    # Флаг: шаг завершился по таймауту (собеседник не ответил)
+    timed_out: bool = False
 
     def __repr__(self):
-        return f"{'✓' if self.executed else '○'} {self.action_type.value}: {self.description}"
+        status = "⏱" if self.timed_out else ("✓" if self.executed else "○")
+        return f"{status} {self.action_type.value}: {self.description}"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -60,7 +63,8 @@ class PlanStep:
             'parameters': self.parameters, 'description': self.description,
             'estimated_duration': self.estimated_duration,
             'executed': self.executed, 'success': self.success,
-            'actual_duration': self.actual_duration, 'result': self.result
+            'actual_duration': self.actual_duration, 'result': self.result,
+            'timed_out': self.timed_out
         }
 
     @classmethod
@@ -72,7 +76,8 @@ class PlanStep:
             description=data.get('description', ''),
             estimated_duration=data.get('estimated_duration', 1.0),
             executed=data.get('executed', False), success=data.get('success', False),
-            actual_duration=data.get('actual_duration', 0.0), result=data.get('result', {})
+            actual_duration=data.get('actual_duration', 0.0), result=data.get('result', {}),
+            timed_out=data.get('timed_out', False)
         )
 
 
@@ -97,6 +102,27 @@ class Plan:
 
     def get_progress(self, idx: int) -> float:
         return min(1.0, idx / len(self.steps)) if self.steps else 0.0
+
+    def skip_to_end_conversation(self, current_idx: int) -> int:
+        """
+        При таймауте wait_for_response — пропустить statement/farewell,
+        найти ближайший END_CONVERSATION и вернуть его индекс.
+        Если не найден — вернуть len(steps) (план завершён).
+        """
+        for i in range(current_idx, len(self.steps)):
+            if self.steps[i].action_type == ActionType.END_CONVERSATION:
+                # Пометить пропущенные шаги как «не нужны»
+                for j in range(current_idx, i):
+                    self.steps[j].executed = True
+                    self.steps[j].success = False
+                    self.steps[j].timed_out = True
+                return i
+        # Нет END_CONVERSATION — просто заканчиваем план
+        for j in range(current_idx, len(self.steps)):
+            self.steps[j].executed = True
+            self.steps[j].success = False
+            self.steps[j].timed_out = True
+        return len(self.steps)
 
     def get_completed_steps(self) -> List[PlanStep]:
         return [s for s in self.steps if s.executed]
@@ -138,25 +164,36 @@ class Planner:
         if desire.source == 'incoming_message' or desc.startswith('ответить'):
             return self._create_respond_plan(desire, beliefs_base, agent_id)
 
+        # Idle Drive — минимальный план одного действия
+        if getattr(desire, 'source', '') == 'idle_drive' or desire.context.get('is_idle'):
+            return self._create_idle_plan(desire, beliefs_base, agent_id)
+
         # Социальное желание — инициатор диалога
         social_kw = ['поговорить', 'общаться', 'сказать', 'пообщаться',
                      'поделиться', 'помочь', 'найти утешение']
         if any(w in desc for w in social_kw):
             return self._create_initiator_plan(desire, beliefs_base, agent_id)
 
-        if any(w in desc for w in ['пойти', 'переместиться', 'идти']):
+        if any(w in desc for w in ['пойти', 'переместиться', 'идти', 'прогуляться']):
             return self._create_movement_plan(desire, beliefs_base, agent_id)
         if any(w in desc for w in ['найти', 'искать', 'поиск']):
             return self._create_search_plan(desire, beliefs_base, agent_id)
         if any(w in desc for w in ['изучить', 'узнать', 'прочитать', 'исследовать']):
             return self._create_learning_plan(desire, beliefs_base, agent_id)
 
+        # Несоциальные личностные желания → план автономной деятельности
+        if any(w in desc for w in ['тихое место', 'размышлени', 'побыть одному', 'уединени']):
+            return self._create_solo_plan(desire, beliefs_base, agent_id, mode='reflection')
+        if any(w in desc for w in ['организовать', 'упорядочить', 'дела']):
+            return self._create_solo_plan(desire, beliefs_base, agent_id, mode='organize')
+
         return self._create_generic_plan(desire, beliefs_base, agent_id)
 
     # ──────────────────────────────────────────────────────────────────
-    # ОТВЕТЧИК: init → answer → end
-    # Минимально — без встречного вопроса, без wait.
-    # Встречный вопрос провоцировал новый respond_desire у инициатора.
+    # ОТВЕТЧИК FSM: init → answer → wait(6 тиков) → end
+    # Ждём реакции собеседника на наш ответ 30 сек (6 тиков по 5с).
+    # Завершаем по таймауту или farewell от партнёра.
+    # На быстрый ответ farewell от собеседника — сразу END без ожидания.
     # ──────────────────────────────────────────────────────────────────
     def _create_respond_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
         target = desire.context.get('target_agent', '')
@@ -167,12 +204,14 @@ class Planner:
         return Plan(
             goal=f"Ответить {target}",
             steps=[
+                # 1. Войти в диалог (или переиспользовать существующий)
                 PlanStep(
                     action_type=ActionType.INITIATE_CONVERSATION,
                     parameters={"target": target, "topic": topic},
                     description=f"Войти в диалог с {target}",
                     estimated_duration=0.5
                 ),
+                # 2. Отправить содержательный ответ
                 PlanStep(
                     action_type=ActionType.SEND_MESSAGE,
                     parameters={
@@ -187,14 +226,29 @@ class Planner:
                     description=f"Ответить {target}",
                     estimated_duration=1.5
                 ),
+                # 3. Ждём реакции — 6 тиков (30 сек при тике 5с).
+                #    on_timeout="end": тишина → завершаем разговор чисто.
+                #    farewell от партнёра → тоже сразу END.
+                PlanStep(
+                    action_type=ActionType.WAIT_FOR_RESPONSE,
+                    parameters={
+                        "expected_from": target,
+                        "timeout": 30.0,
+                        "max_ticks": 6,
+                        "on_timeout": "end"
+                    },
+                    description=f"Ждать реакции {target}",
+                    estimated_duration=5.0
+                ),
+                # 4. Завершить разговор
                 PlanStep(
                     action_type=ActionType.END_CONVERSATION,
                     parameters={"target": target},
-                    description="Завершить свою часть",
+                    description="Завершить разговор",
                     estimated_duration=0.5
                 ),
             ],
-            expected_outcome=f"Ответ отправлен {target}"
+            expected_outcome=f"Диалог с {target} завершён"
         )
 
     # ──────────────────────────────────────────────────────────────────
@@ -328,6 +382,102 @@ class Planner:
             PlanStep(action_type=ActionType.OBSERVE,
                      parameters={}, description="Оценить ситуацию"),
         ], expected_outcome="Достичь цели")
+
+    def _create_idle_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
+        """
+        Idle Drive план: одно простое несоциальное действие.
+        Быстро завершается (1 шаг) — чтобы агент не «застрял» в idle.
+        Вид действия определяется контекстом желания (action поле).
+        """
+        action_hint = desire.context.get('action', 'observe')
+        dest = desire.context.get('destination', 'Центральная площадь')
+        topic = desire.context.get('topic', 'текущие мысли')
+
+        if action_hint == 'move':
+            steps = [PlanStep(
+                action_type=ActionType.MOVE,
+                parameters={"destination": dest},
+                description=f"Прогуляться к {dest}",
+                estimated_duration=1.0
+            )]
+        elif action_hint == 'think':
+            steps = [PlanStep(
+                action_type=ActionType.THINK,
+                parameters={"topic": topic},
+                description="Мечтать и размышлять",
+                estimated_duration=1.0
+            )]
+        else:  # observe
+            steps = [PlanStep(
+                action_type=ActionType.OBSERVE,
+                parameters={"subject": "surroundings"},
+                description="Осмотреться вокруг",
+                estimated_duration=1.0
+            )]
+
+        return Plan(
+            goal=desire.description,
+            steps=steps,
+            expected_outcome="Idle завершён"
+        )
+
+    def _create_solo_plan(self, desire, beliefs_base, agent_id: str, mode: str = 'reflection') -> Plan:
+        """
+        Автономный план для несоциальных желаний (размышление, организация дел).
+        Специально содержит несколько шагов move/think/observe/search —
+        чтобы продвигать счётчик Social Satiety (solo_actions_after_conversation).
+        """
+        import random
+        locations = ['Парк', 'Библиотека', 'Центральная площадь', 'Набережная', 'Кафе']
+
+        if mode == 'reflection':
+            dest = random.choice(['Парк', 'Библиотека', 'Набережная'])
+            topic = desire.context.get('topic', 'недавние события')
+            return Plan(
+                goal=desire.description,
+                steps=[
+                    PlanStep(action_type=ActionType.MOVE,
+                             parameters={"destination": dest},
+                             description=f"Найти тихое место — {dest}",
+                             estimated_duration=1.0),
+                    PlanStep(action_type=ActionType.OBSERVE,
+                             parameters={"subject": "surroundings"},
+                             description="Осмотреться, почувствовать атмосферу",
+                             estimated_duration=1.0),
+                    PlanStep(action_type=ActionType.THINK,
+                             parameters={"topic": topic},
+                             description=f"Поразмышлять о {topic}",
+                             estimated_duration=2.0),
+                    PlanStep(action_type=ActionType.OBSERVE,
+                             parameters={"subject": "inner_state"},
+                             description="Прислушаться к себе",
+                             estimated_duration=1.0),
+                ],
+                expected_outcome="Уединение и размышление"
+            )
+        else:  # organize
+            return Plan(
+                goal=desire.description,
+                steps=[
+                    PlanStep(action_type=ActionType.THINK,
+                             parameters={"topic": "приоритеты и планы"},
+                             description="Обдумать приоритеты",
+                             estimated_duration=1.5),
+                    PlanStep(action_type=ActionType.OBSERVE,
+                             parameters={"subject": "environment"},
+                             description="Оценить обстановку",
+                             estimated_duration=1.0),
+                    PlanStep(action_type=ActionType.SEARCH,
+                             parameters={"query": "полезные ресурсы"},
+                             description="Найти нужные ресурсы",
+                             estimated_duration=1.5),
+                    PlanStep(action_type=ActionType.THINK,
+                             parameters={"topic": "структура дел"},
+                             description="Систематизировать задачи",
+                             estimated_duration=1.0),
+                ],
+                expected_outcome="Дела организованы"
+            )
 
 
 # ── Утилиты ──────────────────────────────────────────────────────────
