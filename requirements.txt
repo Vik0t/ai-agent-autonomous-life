@@ -6,3 +6,5 @@ scikit-learn
 requests
 python-dotenv
 websockets
+openai 
+python-dotenv
