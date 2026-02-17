@@ -38,7 +38,7 @@ function initializeWebSocket() {
 
 // Глобальное состояние для хранения данных агентов
 window.agentsData = [];
-window.currentView = 'agents';
+window.currentView = 'dashboard';
 window.selectedAgent = null;
 window.selectedAgents = []; // Для групповых чатов
 window.messages = {}; // Для хранения сообщений

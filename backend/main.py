@@ -13,6 +13,7 @@
 import os
 import sys
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -334,6 +335,33 @@ async def inject_message(agent_id: str, data: dict = Body(...)):
     )
     await simulator.communication_hub.send_message(msg)
     return {"status": "injected", "agent": agent_id, "content": content}
+
+
+@app.post("/api/agents")
+async def create_agent(data: dict = Body(...)):
+    """Создать нового агента."""
+    try:
+        agent_id = f"agent-{int(time.time() * 1000)}"
+        name = data.get("name", f"Агент-{agent_id[-4:]}")
+        avatar = data.get("avatar", "🤖")
+        personality = data.get("personality", {
+            "openness": 0.5,
+            "conscientiousness": 0.5,
+            "extraversion": 0.5,
+            "agreeableness": 0.5,
+            "neuroticism": 0.5
+        })
+
+        # Создаем нового агента
+        agent = Agent(agent_id, name, avatar, personality, llm_interface=simulator.llm_interface)
+        simulator.add_agent(agent)
+
+        # Регистрируем агента в системе коммуникации
+        simulator.communication_hub.register_agent(agent_id)
+
+        return {"status": "ok", "agent": agent.to_dict()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}, 400
 
 
 @app.post("/api/control/speed")

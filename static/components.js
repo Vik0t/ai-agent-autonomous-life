@@ -759,6 +759,30 @@ const App = () => {
         );
     }
 
+    // Отображение страницы создания агента
+    if (window.currentView === 'create-agent') {
+        return React.createElement('div', { className: 'container' },
+            React.createElement(Header),
+            React.createElement(Navigation, {
+                currentPage: 'create-agent',
+                onNavigate: (page) => window.setView(page)
+            }),
+            React.createElement(AgentCreator, {
+                onBack: () => window.setView('dashboard'),
+                onCreateAgent: (agent) => {
+                    // Update global agents data
+                    if (!window.agentsData) {
+                        window.agentsData = [];
+                    }
+                    window.agentsData.push(agent);
+                    
+                    // Refresh agents list in state
+                    setAgents([...agents, agent]);
+                }
+            })
+        );
+    }
+
     // Отображение навигации и контента в зависимости от текущей страницы
     if (window.currentView === 'agents') {
         // Отображение списка агентов
