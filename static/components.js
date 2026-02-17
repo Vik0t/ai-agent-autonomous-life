@@ -138,14 +138,38 @@ const ControlPanel = ({ agents, onAddEvent, onSendMessage, onSetSpeed, timeSpeed
 
     const handleAddEvent = () => {
         if (newEvent.trim()) {
-            onAddEvent(newEvent);
+            // Send event to backend via WebSocket
+            window.websocketClient.sendMessage({
+                type: 'add_event',
+                event_description: newEvent
+            });
             setNewEvent('');
         }
     };
 
     const handleSendMessage = () => {
         if (messageContent.trim() && recipient) {
-            onSendMessage(recipient, messageContent);
+            // Send message to backend via WebSocket
+            window.websocketClient.sendMessage({
+                type: 'send_message',
+                sender_id: 'user',
+                receiver_id: recipient,
+                content: messageContent
+            });
+            
+            // Add to global messages
+            if (!window.messages[recipient]) {
+                window.messages[recipient] = [];
+            }
+            window.messages[recipient].push({
+                id: Date.now().toString(),
+                sender_id: 'user',
+                receiver_id: recipient,
+                content: messageContent,
+                timestamp: new Date().toLocaleTimeString(),
+                is_user: true
+            });
+            
             setMessageContent('');
             setRecipient('');
         }
@@ -576,37 +600,43 @@ const App = () => {
 
     // Инициализация
     React.useEffect(() => {
-        // Имитация загрузки
-        setTimeout(() => {
-            // Используем данные из глобального состояния
-            const mockAgents = window.agentsData || generateMockAgents();
-            setAgents(mockAgents);
+        // Используем данные из глобального состояния
+        const initialAgents = window.agentsData || generateMockAgents();
+        setAgents(initialAgents);
+        
+        // Добавляем начальные события
+        const initialEvents = [
+            { id: 1, text: 'Система инициализирована. Агенты активированы.', timestamp: new Date().toLocaleTimeString() },
+            { id: 2, text: 'Начало симуляции взаимодействий агентов', timestamp: new Date().toLocaleTimeString() }
+        ];
+        setEvents(initialEvents);
+        
+        document.getElementById('loading').classList.add('hidden');
+        setIsLoading(false);
+        
+        // Set up listener for world state updates
+        const handleWorldState = (worldState) => {
+            if (worldState.agents) {
+                setAgents(worldState.agents);
+            }
             
-            // Добавляем начальные события
-            const initialEvents = [
-                { id: 1, text: 'Система инициализирована. 8 агентов активированы.', timestamp: new Date().toLocaleTimeString() },
-                { id: 2, text: 'Алекса начала анализ окружения', timestamp: new Date().toLocaleTimeString() },
-                { id: 3, text: 'Нексус отправил сообщение Кайросу', timestamp: new Date().toLocaleTimeString() }
-            ];
-            setEvents(initialEvents);
-            
-            document.getElementById('loading').classList.add('hidden');
-            setIsLoading(false);
-        }, 1500);
-
-        // Симуляция входящих событий
-        const interval = setInterval(() => {
-            setEvents(prev => {
-                const newEvent = {
-                    id: Date.now(),
-                    text: generateRandomEvent(),
-                    timestamp: new Date().toLocaleTimeString()
-                };
-                return [newEvent, ...prev.slice(0, 49)];
-            });
-        }, 3000);
-
-        return () => clearInterval(interval);
+            // Convert recent events to display format
+            if (worldState.recent_events) {
+                const formattedEvents = worldState.recent_events.map(event => ({
+                    id: event.id,
+                    text: event.description || event.type,
+                    timestamp: new Date(event.timestamp * 1000).toLocaleTimeString()
+                }));
+                setEvents(formattedEvents);
+            }
+        };
+        
+        window.websocketClient.on('world_state', handleWorldState);
+        
+        // Clean up listener
+        return () => {
+            window.websocketClient.off('world_state', handleWorldState);
+        };
     }, []);
 
     const generateRandomEvent = () => {

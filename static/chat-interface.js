@@ -14,49 +14,42 @@ const ChatInterface = ({ agent, onBack, onSendMessage }) => {
         scrollToBottom();
     }, [messages]);
 
-    // Simulate loading chat history
+    // Load chat history
     React.useEffect(() => {
         if (agent) {
             setIsLoading(true);
-            // Simulate API call to fetch chat history
-            setTimeout(() => {
-                const mockMessages = [
-                    {
-                        id: '1',
-                        sender_id: 'user',
-                        receiver_id: agent.id,
-                        content: 'Привет! Как дела?',
-                        timestamp: '10:30',
-                        is_user: true
-                    },
-                    {
-                        id: '2',
-                        sender_id: agent.id,
-                        receiver_id: 'user',
-                        content: `Привет! У меня всё хорошо, спасибо за спрос. Я ${agent.name}, и я рад общаться с тобой!`,
-                        timestamp: '10:32',
-                        is_user: false
-                    },
-                    {
-                        id: '3',
-                        sender_id: 'user',
-                        receiver_id: agent.id,
-                        content: 'Отлично! Мы работаем над новыми функциями для симуляции.',
-                        timestamp: '10:35',
-                        is_user: true
-                    },
-                    {
-                        id: '4',
-                        sender_id: agent.id,
-                        receiver_id: 'user',
-                        content: 'Это звучит интересно! Расскажи подробнее о проекте.',
-                        timestamp: '10:37',
-                        is_user: false
-                    }
-                ];
-                setMessages(mockMessages);
-                setIsLoading(false);
-            }, 500);
+            // Load messages from global state
+            const agentMessages = window.messages[agent.id] || [];
+            setMessages(agentMessages);
+            setIsLoading(false);
+            
+            // Set up listener for new messages
+            const handleMessage = (message) => {
+                if (message.sender_id === agent.id) {
+                    setMessages(prev => {
+                        // Check if message already exists
+                        const exists = prev.some(m => m.id === message.id);
+                        if (!exists) {
+                            return [...prev, {
+                                id: message.id,
+                                sender_id: message.sender_id,
+                                receiver_id: 'user',
+                                content: message.content,
+                                timestamp: new Date().toLocaleTimeString(),
+                                is_user: false
+                            }];
+                        }
+                        return prev;
+                    });
+                }
+            };
+            
+            window.websocketClient.on('agent_message', handleMessage);
+            
+            // Clean up listener
+            return () => {
+                window.websocketClient.off('agent_message', handleMessage);
+            };
         }
     }, [agent]);
 
@@ -75,29 +68,19 @@ const ChatInterface = ({ agent, onBack, onSendMessage }) => {
             setMessages(prev => [...prev, message]);
             setNewMessage('');
             
-            // Simulate agent response
-            setTimeout(() => {
-                const responses = [
-                    "Интересная мысль! Давай обсудим подробнее.",
-                    "Я согласен с твоей точкой зрения.",
-                    "Не уверен, что это правильный подход.",
-                    "Это напоминает мне прошлое событие...",
-                    "Давайте работать вместе над этим!",
-                    "Мне нужно время обдумать это.",
-                    "Звучит интригующе! Расскажи больше."
-                ];
-                
-                const response = {
-                    id: (Date.now() + 1).toString(),
-                    sender_id: agent.id,
-                    receiver_id: 'user',
-                    content: responses[Math.floor(Math.random() * responses.length)],
-                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                    is_user: false
-                };
-                
-                setMessages(prev => [...prev, response]);
-            }, 1000 + Math.random() * 2000);
+            // Send message to backend
+            window.websocketClient.sendMessage({
+                type: 'send_message',
+                sender_id: 'user',
+                receiver_id: agent.id,
+                content: newMessage
+            });
+            
+            // Add to global messages
+            if (!window.messages[agent.id]) {
+                window.messages[agent.id] = [];
+            }
+            window.messages[agent.id].push(message);
         }
     };
 

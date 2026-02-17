@@ -1,6 +1,18 @@
+# backend/agent.py  [REFACTOR v3]
+"""
+Исправления:
+1. think() принимает active_conversation_partners и передаёт в deliberation_cycle
+2. confirm_action_execution при END_CONVERSATION уведомляет deliberation_cycle
+   чтобы desire_generator поставил кулдаун и не создавал новые respond_desires
+"""
+
+from typing import Dict, List, Any
 from pydantic import BaseModel
-from typing import Dict, List
-import numpy as np
+from core.bdi import (
+    BeliefBase, Desire, Intention, DeliberationCycle,
+    create_self_belief, BeliefType, PlanStep, ActionType, IntentionStatus, DesireStatus
+)
+
 
 class Personality(BaseModel):
     openness: float
@@ -9,79 +21,129 @@ class Personality(BaseModel):
     agreeableness: float
     neuroticism: float
 
+
 class Emotion(BaseModel):
-    happiness: float
-    sadness: float
-    anger: float
-    fear: float
-    surprise: float
-    disgust: float
+    happiness: float = 0.5
+    sadness: float = 0.0
+    anger: float = 0.0
+    fear: float = 0.0
+    surprise: float = 0.0
+    disgust: float = 0.0
 
-class Memory(BaseModel):
-    id: str
-    content: str
-    timestamp: float
-    importance: float
-
-class Relationship(BaseModel):
-    agent_id: str
-    affinity: float
-    familiarity: float
-    last_interaction: float
 
 class Agent:
-    def __init__(self, agent_id: str, name: str):
+    def __init__(self, agent_id: str, name: str, avatar: str,
+                 personality_data: Dict, llm_interface=None):
         self.id = agent_id
         self.name = name
-        self.personality = Personality(
-            openness=0.5,
-            conscientiousness=0.5,
-            extraversion=0.5,
-            agreeableness=0.5,
-            neuroticism=0.5
+        self.avatar = avatar
+        self.personality = Personality(**personality_data)
+        self.emotions = Emotion()
+        self.beliefs = BeliefBase()
+        self.desires: List[Desire] = []
+        self.intentions: List[Intention] = []
+        self.deliberation_cycle = DeliberationCycle(llm_interface=llm_interface)
+        self._initialize_self_beliefs()
+        self.current_plan = "Ожидание..."
+
+    def _initialize_self_beliefs(self):
+        self.beliefs.add_belief(create_self_belief(self.id, "name", self.name))
+        self.beliefs.add_belief(create_self_belief(self.id, "location", "Центральная площадь"))
+
+    def think(
+        self,
+        perceptions: List[Dict[str, Any]],
+        active_conversation_partners: List[str] = None  # FIX: агенты в активном диалоге
+    ) -> List[Dict]:
+        result = self.deliberation_cycle.run_cycle(
+            agent_id=self.id,
+            beliefs=self.beliefs,
+            desires=self.desires,
+            intentions=self.intentions,
+            personality=self.personality.dict(),
+            emotions=self.emotions.dict(),
+            perceptions=perceptions,
+            max_intentions=1,
+            active_conversation_partners=active_conversation_partners or []
         )
-        self.emotions = Emotion(
-            happiness=0.5,
-            sadness=0.0,
-            anger=0.0,
-            fear=0.0,
-            surprise=0.0,
-            disgust=0.0
-        )
-        self.memories: List[Memory] = []
-        self.relationships: Dict[str, Relationship] = {}
-        self.current_plan = ""
-        
-    def update_emotions(self, event: str):
-        # Simple emotion update based on event
-        if "happy" in event.lower():
-            self.emotions.happiness = min(1.0, self.emotions.happiness + 0.1)
-        elif "sad" in event.lower():
-            self.emotions.sadness = min(1.0, self.emotions.sadness + 0.1)
-        elif "angry" in event.lower():
-            self.emotions.anger = min(1.0, self.emotions.anger + 0.1)
-            
-    def add_memory(self, content: str, importance: float = 0.5):
-        memory = Memory(
-            id=str(len(self.memories)),
-            content=content,
-            timestamp=len(self.memories),
-            importance=importance
-        )
-        self.memories.append(memory)
-        
-    def get_relationship(self, agent_id: str) -> Relationship:
-        if agent_id not in self.relationships:
-            self.relationships[agent_id] = Relationship(
-                agent_id=agent_id,
-                affinity=0.0,
-                familiarity=0.0,
-                last_interaction=0.0
-            )
-        return self.relationships[agent_id]
-        
-    def update_relationship(self, agent_id: str, affinity_change: float, familiarity_change: float):
-        relationship = self.get_relationship(agent_id)
-        relationship.affinity = np.clip(relationship.affinity + affinity_change, -1.0, 1.0)
-        relationship.familiarity = np.clip(relationship.familiarity + familiarity_change, 0.0, 1.0)
-        relationship.last_interaction = len(self.memories)
+
+        if result.get('new_intention'):
+            self.current_plan = result['new_intention'].desire_description
+        elif not any(i.status == IntentionStatus.ACTIVE for i in self.intentions):
+            self.current_plan = "Обдумывание..."
+
+        actions_to_perform = []
+        for action_info in result['actions_to_execute']:
+            action: PlanStep = action_info['action']
+            actions_to_perform.append({
+                "agent_id": self.id,
+                "action_type": action.action_type.value,
+                "params": action.parameters,
+                "intention_id": action_info['intention_id'],
+                "step_object": action
+            })
+        return actions_to_perform
+
+    def confirm_action_execution(self, intention_id: str, step_object: PlanStep,
+                                 success: bool, message: str):
+        step_object.executed = True
+        step_object.success = success
+
+        SOCIAL_SOURCES = {
+            'incoming_message', 'personality_extraversion', 'personality_agreeableness',
+            'emotion_happiness', 'emotion_sadness'
+        }
+
+        for intention in self.intentions:
+            if intention.id == intention_id:
+                intention.update_progress({"success": success, "message": message})
+
+                if intention.is_completed():
+                    intention.complete()
+
+                    # Помечаем desire как ACHIEVED
+                    for desire in self.desires:
+                        if desire.id == intention.desire_id:
+                            desire.status = DesireStatus.ACHIEVED
+
+                            # Автоматически засчитываем solo при завершении несоц. намерения.
+                            # Это страховка: даже если симулятор не вызвал notify_solo_action
+                            # пошагово (напр. для idle/think/learn планов), счётчик двигается.
+                            if desire.source not in SOCIAL_SOURCES:
+                                self.deliberation_cycle.notify_solo_action(
+                                    desire.source or 'idle_drive'
+                                )
+                            break
+                break
+
+    def notify_conversation_ended(self, partner_id: str):
+        """
+        FIX: Уведомить BDI о завершении разговора с partner_id.
+        Это активирует кулдаун в DesireGenerator — не создавать respond_desires 30 сек.
+        """
+        self.deliberation_cycle.notify_conversation_ended(partner_id)
+
+    def notify_solo_action(self, action_type: str):
+        """
+        Social Satiety: уведомить BDI что выполнено несоциальное действие.
+        После MIN_SOLO_ACTIONS действий снимает блок на новые социальные желания.
+        """
+        self.deliberation_cycle.notify_solo_action(action_type)
+
+    def to_dict(self):
+        loc_belief = self.beliefs.get_belief(BeliefType.SELF, self.id, "location")
+        current_location = loc_belief.value if loc_belief else "Неизвестно"
+
+        return {
+            "id": self.id,
+            "name": self.name,
+            "avatar": self.avatar,
+            "personality": self.personality.dict(),
+            "emotions": self.emotions.dict(),
+            "current_plan": self.current_plan,
+            "location": current_location,
+            "status": "active",
+            "memory_count": len(self.beliefs.beliefs),
+            "relationships": {},
+            "memories": []
+        }
