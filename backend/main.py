@@ -142,7 +142,27 @@ async def websocket_endpoint(websocket: WebSocket):
         })
         await websocket.send_json(init_data)
         while True:
-            await websocket.receive_text()
+            data = await websocket.receive_json()
+            # Handle messages from frontend
+            if data.get('type') == 'send_message':
+                # Send message to agent
+                msg = Message(
+                    sender_id=data.get('sender_id', 'user'),
+                    receiver_id=data['receiver_id'],
+                    content=data['content'],
+                    topic=data.get('topic', 'user_input')
+                )
+                await simulator.communication_hub.send_message(msg)
+                simulator._log_event(
+                    "user_message",
+                    f"Пользователь → {data['receiver_id']}: {data['content'][:60]}",
+                    [data['receiver_id']],
+                    {"content": data['content']}
+                )
+            elif data.get('type') == 'add_event':
+                # Add global event
+                event_desc = data.get('event_description', 'Global Event')
+                simulator._log_event("user_event", f"Событие: {event_desc}", list(simulator.agents.keys()))
     except WebSocketDisconnect:
         if websocket in active_connections:
             active_connections.remove(websocket)
