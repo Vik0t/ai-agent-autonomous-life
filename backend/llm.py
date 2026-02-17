@@ -9,17 +9,15 @@ load_dotenv()
 class LLMInterface:
     def __init__(self):
         # Используем OPENROUTER_API_KEY из вашего .env
-        self.api_key = "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"
+        self.api_key = os.getenv("OPENROUTER_API_KEY")
         
         if not self.api_key:
-            # Проверка на случай, если ключ все еще лежит в OPENAI_API_KEY
-            self.api_key = os.getenv("OPENAI_API_KEY")
+            self.api_key = os.getenv("OPENROUTER_API_KEY")
 
         if not self.api_key:
             print("⚠️ WARNING: No API Key found in .env (expected OPENROUTER_API_KEY)")
             self.client = None
         else:
-            # Настройка клиента OpenAI для работы через OpenRouter
             self.client = OpenAI(
                 base_url="https://openrouter.ai/api/v1",
                 api_key=self.api_key,
@@ -164,7 +162,7 @@ class LLMInterface:
         try:
             print(f"User prompt for {agent_name} ({message_type}):\n{user_prompt}")
             response = self.client.chat.completions.create(
-                model="openai/gpt-3.5-turbo",
+                model="openrouter/aurora-alpha",
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_prompt}
