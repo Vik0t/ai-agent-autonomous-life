@@ -1,11 +1,14 @@
-# simulator.py  [v4 — финальный рефакторинг]
+# simulator.py  [v5 — Atomic FORCE_QUIT + Idle Guard integration]
 """
-Исправления:
-1. _do_end_conversation уведомляет ОБОИХ агентов через notify_conversation_ended.
-2. _process_game_tick передаёт active_conversation_partners в agent.think().
-3. Сообщения читаются ОДИН РАЗ за тик (_tick_messages кеш).
-4. wait_for_response использует тиковый счётчик (MAX_WAIT_TICKS=4, timeout→success).
-5. Тип сообщения прокидывается в perception.data['message_type'] для desires.py.
+Исправления v5:
+1. _process_game_tick после agent.think() вызывает consume_force_quit_partners()
+   и запускает _do_atomic_force_quit() — атомарное закрытие диалога:
+     * закрывает разговор в CommunicationHub для ОБОИХ участников
+     * удаляет все intentions связанные с этим партнёром у ОБОИХ агентов
+     * вызывает notify_conversation_ended у обоих
+     * сбрасывает _wait_tick_counters для intentions этой пары
+2. Idle Guard интегрирован через deliberation (v8) — simulator только логирует.
+3. Предыдущие исправления v4 сохранены без изменений.
 """
 
 import asyncio
@@ -112,6 +115,11 @@ class WorldSimulator:
                 perceptions=perceptions,
                 active_conversation_partners=active_partners
             )
+            # FIX 2: Атомарный FORCE_QUIT — читаем флаги из deliberation
+            force_quit_targets = agent.deliberation_cycle.consume_force_quit_partners()
+            for partner_id in force_quit_targets:
+                await self._do_atomic_force_quit(agent, partner_id)
+
             if not actions:
                 # Агент не выполняет действий — логируем idle
                 has_suspended = any(
@@ -151,7 +159,7 @@ class WorldSimulator:
                 importance=0.9 if msg.requires_response else 0.5
             ))
             print(f"📨 {agent.name} получил [{msg.message_type.value}] "
-                  f"от {msg.sender_id}: {msg.content[:60]}")
+                  f"от {msg.sender_id}: {msg.content}")
             self._update_relationship(agent.id, msg.sender_id, 0.04)
 
         # Наблюдение за другими агентами
@@ -226,6 +234,8 @@ class WorldSimulator:
 
         # ── Context Awareness: проверяем кулдаун цели и собственный соц. блок ──
         dg = agent.deliberation_cycle.desire_generator
+        
+        # 1. Проверяем свой кулдаун на этого партнера
         if dg.is_on_cooldown(target_id):
             tname = self.agents[target_id].name
             print(f"🚫 {agent.name}: {tname} на кулдауне — отменяем initiate_conversation")
@@ -240,6 +250,7 @@ class WorldSimulator:
                 f"Target {target_id} is on cooldown — conversation aborted")
             return
 
+        # 2. Проверяем свой глобальный соц. блок
         if dg.is_globally_social_blocked():
             print(f"🚫 {agent.name}: соц. блок [{dg.get_social_block_reason()}] — "
                   f"отменяем initiate_conversation")
@@ -252,6 +263,29 @@ class WorldSimulator:
                 command['intention_id'], command['step_object'], False,
                 "Social block active — conversation aborted")
             return
+
+        # 3. [NEW] Проверяем состояние ПАРТНЕРА (не спит ли он?)
+        target_agent = self.agents[target_id]
+        target_dg = target_agent.deliberation_cycle.desire_generator
+
+        # Если цель глобально заблокирована (отдыхает) или имеет батарейку < 0.05
+        if target_dg.is_globally_social_blocked() or target_agent.social_battery < 0.05:
+            tname = target_agent.name
+            print(f"🚫 {agent.name}: цель {tname} отдыхает/устала — отмена разговора")
+            
+            # Перематываем план к концу, так как говорить не с кем
+            for intention in agent.intentions:
+                if intention.id == command['intention_id'] and intention.plan:
+                    intention.plan.skip_to_end_conversation(intention.current_step)
+                    intention.current_step = len(intention.plan.steps)
+                    break
+            
+            agent.confirm_action_execution(
+                command['intention_id'], command['step_object'], False,
+                f"Target {tname} is busy/tired — conversation aborted")
+            return
+
+        # ── Конец проверок, начинаем диалог ──
 
         existing = self.communication_hub.get_active_conversation(agent.id, target_id)
         if existing:
@@ -344,7 +378,78 @@ class WorldSimulator:
         self._update_relationship(agent.id, target_id, 0.03)
         agent.confirm_action_execution(
             command['intention_id'], command['step_object'], True,
-            f"Sent [{msg_type_str}]: {content[:50]}")
+            f"Sent [{msg_type_str}]: {content}")
+
+    async def _do_send(self, agent: Agent, params: Dict, command: Dict):
+        target_id = params.get("target")
+        msg_type_str = params.get("message_type", "statement")
+        topic = params.get("topic", "general")
+        requires_response = params.get("requires_response", False)
+        timeout = params.get("response_timeout", params.get("timeout", 30.0))
+        tone = params.get("tone", "friendly")
+        in_reply_to = params.get("in_reply_to")
+        incoming = params.get("incoming_content", "")
+
+        if not target_id or target_id not in self.agents:
+            agent.confirm_action_execution(
+                command['intention_id'], command['step_object'], False, f"Unknown: {target_id}")
+            return
+
+        # ── Context Awareness: проверяем что разговор ещё жив ──────────
+        conv = self.communication_hub.get_active_conversation(agent.id, target_id)
+        if not conv:
+            # Разговор уже завершён (собеседник вызвал end_conversation раньше нас).
+            # Не отправляем сообщения в пустоту — сразу завершаем шаг как «ненужный».
+            tname = self.agents[target_id].name
+            print(f"🚫 {agent.name}: разговор с {tname} уже закрыт — "
+                  f"пропускаем [{msg_type_str}] (не монологим)")
+            # Перематываем план к end_conversation чтобы подчистить намерение
+            for intention in agent.intentions:
+                if intention.id == command['intention_id'] and intention.plan:
+                    new_idx = intention.plan.skip_to_end_conversation(intention.current_step)
+                    intention.current_step = new_idx
+                    break
+            agent.confirm_action_execution(
+                command['intention_id'], command['step_object'], True,
+                f"Skipped [{msg_type_str}] — conversation already closed")
+            return
+
+        ctx_msgs = conv.get_context_for_agent(agent.id, max_messages=5)
+
+        content = self.llm_interface.generate_dialogue(
+            agent_name=agent.name,
+            personality=agent.personality.dict(),
+            context=f"Разговор о {topic}" if topic else "Разговор",
+            conversation_history=ctx_msgs,
+            message_type=msg_type_str,
+            incoming_message=incoming
+        )
+
+        type_map = {
+            "greeting": MessageType.GREETING, "question": MessageType.QUESTION,
+            "answer": MessageType.ANSWER, "statement": MessageType.STATEMENT,
+            "farewell": MessageType.FAREWELL,
+        }
+        msg = Message(
+            id=str(uuid.uuid4()), sender_id=agent.id, receiver_id=target_id,
+            content=content, message_type=type_map.get(msg_type_str, MessageType.STATEMENT),
+            conversation_id=conv.id, topic=topic,
+            requires_response=requires_response, response_timeout=timeout,
+            tone=tone, in_reply_to=in_reply_to
+        )
+        await self.communication_hub.send_message(msg)
+
+        tname = self.agents[target_id].name
+        print(f"💬 {agent.name} → {tname} [{msg_type_str}]: {content}")
+        self._log_event("message", f"{agent.name} → {tname}: {content}",
+                        [agent.id, target_id],
+                        {"message_id": msg.id, "conversation_id": conv.id,
+                         "message_type": msg_type_str, "content": content,
+                         "sender_name": agent.name, "receiver_name": tname})
+        self._update_relationship(agent.id, target_id, 0.03)
+        agent.confirm_action_execution(
+            command['intention_id'], command['step_object'], True,
+            f"Sent [{msg_type_str}]: {content}")
 
     async def _do_wait(self, agent: Agent, params: Dict, command: Dict):
         expected_from = params.get("expected_from")
@@ -388,7 +493,7 @@ class WorldSimulator:
             self._wait_tick_counters.pop(intention_id, None)
             agent.confirm_action_execution(
                 command['intention_id'], command['step_object'], True,
-                f"Got reply: {response.content[:50]}")
+                f"Got reply: {response.content}")
         else:
             self._wait_tick_counters[intention_id] += 1
             ticks = self._wait_tick_counters[intention_id]
@@ -454,6 +559,74 @@ class WorldSimulator:
 
         agent.confirm_action_execution(
             command['intention_id'], command['step_object'], True, "Conversation ended")
+
+
+    # ── FIX 2: Атомарный FORCE_QUIT ────────────────────────────────────
+
+    async def _do_atomic_force_quit(self, agent, partner_id: str):
+        """
+        Атомарно завершает диалог между agent и partner_id:
+        1. Закрывает conversation в CommunicationHub.
+        2. Удаляет все intentions связанные с partner_id у ОБОИХ агентов.
+        3. Сбрасывает _wait_tick_counters для затронутых intentions.
+        4. Вызывает notify_conversation_ended у обоих.
+        """
+        if partner_id not in self.agents:
+            return
+
+        partner = self.agents[partner_id]
+        agent_name = agent.name
+        partner_name = partner.name
+
+        # Шаг 1: Закрываем разговор в CommunicationHub
+        conv = self.communication_hub.get_active_conversation(agent.id, partner_id)
+        if conv:
+            self.communication_hub.end_conversation(conv.id)
+            self._log_event(
+                "force_quit",
+                f"{agent_name} принудительно завершил разговор с {partner_name}",
+                [agent.id, partner_id]
+            )
+            print(f"FORCE_QUIT: {agent_name} <-> {partner_name} -- разговор закрыт")
+
+        # Шаг 2: Удаляем intentions с partner_id у ОБОИХ агентов
+        from core.bdi.desires import DesireStatus
+        for affected_agent in [agent, partner]:
+            other_id = partner_id if affected_agent.id == agent.id else agent.id
+            to_abandon = []
+
+            for intention in affected_agent.intentions:
+                # Находим target через шаги плана
+                target = ""
+                if intention.plan:
+                    for step in intention.plan.steps:
+                        t = step.parameters.get("target", "")
+                        if t:
+                            target = t
+                            break
+                # Или через desires
+                if not target:
+                    for d in affected_agent.desires:
+                        if d.id == intention.desire_id:
+                            target = d.context.get("target_agent", "")
+                            break
+
+                if target == other_id:
+                    to_abandon.append(intention)
+
+            for intention in to_abandon:
+                self._wait_tick_counters.pop(intention.id, None)
+                intention.abandon(f"FORCE_QUIT c {other_id}")
+                for d in affected_agent.desires:
+                    if d.id == intention.desire_id:
+                        d.status = DesireStatus.ABANDONED
+                        break
+                print(f"[FORCE_QUIT] {affected_agent.name}: '{intention.desire_description[:35]}' ABANDONED")
+
+        # Шаг 3: notify + кулдауны
+        agent.notify_conversation_ended(partner_id)
+        partner.notify_conversation_ended(agent.id)
+        print(f"[FORCE_QUIT] {agent_name} и {partner_name}: кулдауны запущены")
 
     def stop_simulation(self):
         self.running = False

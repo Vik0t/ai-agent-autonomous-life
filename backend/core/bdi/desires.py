@@ -1,13 +1,14 @@
 """
-desires.py  [v4 — финальный рефакторинг]
+desires.py  [v5 — LLM-генератор желаний]
 
-Ключевые исправления:
-1. respond_desire создаётся ТОЛЬКО если агент сейчас в активном диалоге с отправителем.
-   Если разговор уже завершён — игнорируем все входящие от этого агента.
-2. Кулдаун поднят до 60 сек и теперь применяется ко ВСЕМ сообщениям от партнёра,
-   не только к farewell.
-3. respond_desire не создаётся если агент-инициатор уже ведёт другой план общения
-   с этим же агентом (проверка через current_intentions в context).
+Ключевые изменения v5:
+1. УДАЛЕНЫ: self.rules, _initialize_rules — правила с lambda-условиями.
+2. generate_desires теперь использует llm.generate_dynamic_desires для создания
+   желаний на основе личности, эмоций, social_battery и восприятий.
+3. Если social_battery < 0.2 — LLM принудительно получает инструкцию
+   игнорировать SOCIAL мотивы (SAFETY/CURIOSITY вместо них).
+4. Сохранены: реактивные respond_desires, cooldown-система, idle_drive,
+   все вспомогательные методы.
 """
 
 from typing import Dict, List, Any, Optional
@@ -103,53 +104,53 @@ class Desire:
         return f"Desire({self.description[:30]}, util={self.calculate_utility():.2f}, {self.status.value})"
 
 
+# Маппинг строковых motivation_type → MotivationType enum
+_MOTIVATION_MAP = {
+    'survival': MotivationType.SURVIVAL,
+    'safety': MotivationType.SAFETY,
+    'social': MotivationType.SOCIAL,
+    'esteem': MotivationType.ESTEEM,
+    'achievement': MotivationType.ACHIEVEMENT,
+    'curiosity': MotivationType.CURIOSITY,
+}
+
+
 class DesireGenerator:
 
-    def __init__(self):
-        self.rules = self._initialize_rules()
-        self.rule_last_triggered: Dict[str, float] = {}
-        self.rule_cooldown_seconds = 300.0  # 5 мин между срабатываниями правил личности
+    def __init__(self, llm_interface=None):
+        # ── LLM-интерфейс ────────────────────────────────────────────
+        self.llm = llm_interface
 
-        # agent_id → timestamp последнего конца разговора с ним
+        # ── Cooldown для LLM-генерации (не вызываем каждый тик) ──────
+        self._llm_last_called: float = 0.0
+        self.llm_cooldown_seconds: float = 60.0   # раз в минуту
+
+        # ── Cooldown на конкретного партнёра (после разговора) ───────
         self._conversation_ended_at: Dict[str, float] = {}
-        # Кулдаун на конкретного партнёра — 120 сек (агент занят «перевариванием»)
         self.post_conversation_cooldown = 120.0
 
-        # Глобальный timestamp последнего завершённого разговора.
-        # Правила личности не срабатывают пока не прошло global_cooldown.
+        # ── Глобальный социальный блок ────────────────────────────────
         self._last_conversation_ended_at: float = 0.0
-        # Глобальный кулдаун на ЛЮБОЙ новый социальный контакт — 90 сек
         self.global_social_cooldown = 90.0
 
-        # Тиковый счётчик: сколько тиков прошло с момента последнего завершения.
-        # Используется КАК ДОПОЛНЕНИЕ к временному кулдауну, потому что тики
-        # нерегулярны и время может не успевать обновляться.
-        self._ticks_since_conversation_ended: int = 999  # старт = «давно»
-        # Минимум тиков отдыха после разговора
+        # ── Тиковый счётчик ──────────────────────────────────────────
+        self._ticks_since_conversation_ended: int = 999
         self.min_rest_ticks: int = 8
 
-        # ── Social Satiety: счётчик индивидуальных (несоциальных) действий ──
-        # После конца разговора агент должен выполнить MIN_SOLO_ACTIONS
-        # несоциальных действий прежде чем снова инициировать общение.
-        self._solo_actions_after_conversation: int = 999  # старт = «уже отдохнул»
-        self.MIN_SOLO_ACTIONS: int = 4  # минимум: move/think/observe/search/...
+        # ── Social Satiety (несоциальные действия после разговора) ───
+        self._solo_actions_after_conversation: int = 999
+        self.MIN_SOLO_ACTIONS: int = 4
+
+    # ── Cooldown/block API ────────────────────────────────────────────
 
     def mark_conversation_ended(self, partner_id: str):
-        """Симулятор вызывает это при end_conversation."""
         now = time.time()
         self._conversation_ended_at[partner_id] = now
         self._last_conversation_ended_at = now
-        # Сброс тикового счётчика — агент «только что» закончил разговор
         self._ticks_since_conversation_ended = 0
-        # Сброс solo-счётчика — нужно сначала заняться своими делами
         self._solo_actions_after_conversation = 0
 
     def mark_solo_action(self, action_type: str):
-        """
-        Deliberation вызывает это когда агент завершает несоциальное намерение.
-        Засчитываются: move, think, observe, search, learn, организация дел.
-        НЕ засчитываются: initiate_conversation, send_message, respond_to_message.
-        """
         SOCIAL_ACTION_TYPES = {
             'initiate_conversation', 'send_message', 'respond_to_message',
             'wait_for_response', 'end_conversation'
@@ -158,29 +159,19 @@ class DesireGenerator:
             self._solo_actions_after_conversation += 1
 
     def tick(self):
-        """Вызывается из DeliberationCycle каждый цикл — продвигает тиковый счётчик."""
         self._ticks_since_conversation_ended += 1
 
     def is_on_cooldown(self, partner_id: str) -> bool:
-        """True если разговор с этим партнёром завершился недавно."""
         last = self._conversation_ended_at.get(partner_id, 0)
         return (time.time() - last) < self.post_conversation_cooldown
 
     def is_globally_social_blocked(self) -> bool:
-        """
-        True если агент ещё «переваривает» прошедший разговор.
-        Разблокировка требует выполнения ВСЕХ трёх условий:
-          1. прошло достаточно реального времени
-          2. прошло достаточно тиков
-          3. выполнено достаточно индивидуальных (несоциальных) действий
-        """
         time_ok = (time.time() - self._last_conversation_ended_at) >= self.global_social_cooldown
         ticks_ok = self._ticks_since_conversation_ended >= self.min_rest_ticks
         solo_ok = self._solo_actions_after_conversation >= self.MIN_SOLO_ACTIONS
         return not (time_ok and ticks_ok and solo_ok)
 
     def get_social_block_reason(self) -> str:
-        """Возвращает читаемую причину блокировки (для логов)."""
         reasons = []
         time_left = self.global_social_cooldown - (time.time() - self._last_conversation_ended_at)
         if time_left > 0:
@@ -193,89 +184,7 @@ class DesireGenerator:
             reasons.append(f"solo-действий: ещё {solo_left}")
         return " | ".join(reasons) if reasons else "разблокирован"
 
-    def _initialize_rules(self) -> List[Dict[str, Any]]:
-        return [
-            {
-                'name': 'extravert_socialization',
-                'condition': lambda p, e, b: p.get('extraversion', 0.5) > 0.6,
-                'desire_template': {
-                    'description': 'Поговорить с кем-то интересным',
-                    'motivation_type': MotivationType.SOCIAL,
-                    'priority': 0.75, 'urgency': 0.6,
-                    'source': 'personality_extraversion'
-                }
-            },
-            {
-                'name': 'introvert_solitude',
-                'condition': lambda p, e, b: p.get('extraversion', 0.5) < 0.3,
-                'desire_template': {
-                    'description': 'Найти тихое место для размышлений',
-                    'motivation_type': MotivationType.SAFETY,
-                    'priority': 0.6, 'urgency': 0.4,
-                    'source': 'personality_introversion'
-                }
-            },
-            {
-                'name': 'openness_exploration',
-                'condition': lambda p, e, b: p.get('openness', 0.5) > 0.7,
-                'desire_template': {
-                    'description': 'Изучить что-то новое',
-                    'motivation_type': MotivationType.CURIOSITY,
-                    'priority': 0.65, 'urgency': 0.3,
-                    'source': 'personality_openness'
-                }
-            },
-            {
-                'name': 'agreeableness_help',
-                'condition': lambda p, e, b: p.get('agreeableness', 0.5) > 0.7,
-                'desire_template': {
-                    'description': 'Помочь кому-то в нужде',
-                    'motivation_type': MotivationType.SOCIAL,
-                    'priority': 0.65, 'urgency': 0.5,
-                    'source': 'personality_agreeableness'
-                }
-            },
-            {
-                'name': 'conscientiousness_organize',
-                'condition': lambda p, e, b: p.get('conscientiousness', 0.5) > 0.7,
-                'desire_template': {
-                    'description': 'Организовать и упорядочить дела',
-                    'motivation_type': MotivationType.ACHIEVEMENT,
-                    'priority': 0.6, 'urgency': 0.4,
-                    'source': 'personality_conscientiousness'
-                }
-            },
-            {
-                'name': 'sadness_comfort',
-                'condition': lambda p, e, b: e.get('sadness', 0) > 0.6,
-                'desire_template': {
-                    'description': 'Найти утешение',
-                    'motivation_type': MotivationType.SOCIAL,
-                    'priority': 0.8, 'urgency': 0.7,
-                    'source': 'emotion_sadness'
-                }
-            },
-            {
-                'name': 'fear_safety',
-                'condition': lambda p, e, b: e.get('fear', 0) > 0.6,
-                'desire_template': {
-                    'description': 'Найти безопасное место',
-                    'motivation_type': MotivationType.SAFETY,
-                    'priority': 0.9, 'urgency': 0.9,
-                    'source': 'emotion_fear'
-                }
-            },
-            {
-                'name': 'happiness_share',
-                'condition': lambda p, e, b: e.get('happiness', 0) > 0.7,
-                'desire_template': {
-                    'description': 'Поделиться радостью с другими',
-                    'motivation_type': MotivationType.SOCIAL,
-                    'priority': 0.6, 'urgency': 0.5,
-                    'source': 'emotion_happiness'
-                }
-            },
-        ]
+    # ── Главный метод: generate_desires ──────────────────────────────
 
     def generate_desires(
         self,
@@ -284,16 +193,18 @@ class DesireGenerator:
         beliefs_base,
         current_desires: List[Desire],
         agent_id: str = "",
+        agent_name: str = "",
         perceptions: List[Dict] = None,
-        active_conversation_partners: List[str] = None
+        active_conversation_partners: List[str] = None,
+        social_battery: float = 1.0        # ← НОВЫЙ параметр
     ) -> List[Desire]:
         new_desires = []
         current_time = time.time()
         active_partners = set(active_conversation_partners or [])
 
-        # ============================================================
-        # 1. Желание ответить — только если сейчас в диалоге с отправителем
-        # ============================================================
+        # ════════════════════════════════════════════════════════════
+        # 1. Реактивное желание ответить (остаётся rule-based — срочное)
+        # ════════════════════════════════════════════════════════════
         if perceptions:
             for perception in perceptions:
                 if perception.get('type') != 'communication':
@@ -308,25 +219,16 @@ class DesireGenerator:
 
                 if not sender_id or sender_id == agent_id:
                     continue
-
-                # Не отвечаем на farewell/ack
                 if msg_type in _NO_RESPOND_MESSAGE_TYPES:
                     print(f"🔇 [{agent_id}] Игнорируем {msg_type} от {sender_id}")
                     continue
-
-                # Не отвечаем если на кулдауне после разговора с этим агентом
                 if self.is_on_cooldown(sender_id):
                     print(f"⏸️ [{agent_id}] Кулдаун с {sender_id} — skip respond_desire")
                     continue
-
-                # FIX A: Не создаём respond_desire если НЕ в активном диалоге с отправителем.
-                # Это отсекает "хвостовые" сообщения из уже завершённого разговора.
                 if sender_id not in active_partners:
                     print(f"🚫 [{agent_id}] Не в диалоге с {sender_id} — skip respond_desire")
                     continue
 
-                # FIX B: Не создаём respond_desire если уже есть ИНИЦИАТОРСКОЕ желание/план
-                # с этим агентом — агент и так общается с ним, ответ будет через statement/farewell.
                 has_initiator = any(
                     d.context.get('target_agent') == sender_id
                     and d.source != 'incoming_message'
@@ -334,10 +236,9 @@ class DesireGenerator:
                     for d in current_desires
                 )
                 if has_initiator:
-                    print(f"🚫 [{agent_id}] Уже инициирует диалог с {sender_id} — skip respond_desire")
+                    print(f"🚫 [{agent_id}] Уже инициирует диалог с {sender_id} — skip")
                     continue
 
-                # Нет уже активного желания ответить этому агенту
                 already = any(
                     d.context.get('target_agent') == sender_id
                     and d.source == 'incoming_message'
@@ -364,50 +265,114 @@ class DesireGenerator:
                 new_desires.append(desire)
                 print(f"💡 [{agent_id}] Создано желание ответить {sender_id} (тип: {msg_type})")
 
-        # ============================================================
-        # 2. Правила личности
-        # ============================================================
-        # Продвигаем тиковый счётчик отдыха
+        # ════════════════════════════════════════════════════════════
+        # 2. Продвижение тикового счётчика
+        # ════════════════════════════════════════════════════════════
         self.tick()
 
-        # Если агент ещё «переваривает» прошедший разговор — не генерируем ничего социального.
-        # Несоциальные правила (SAFETY, CURIOSITY, ACHIEVEMENT) могут срабатывать.
         globally_blocked = self.is_globally_social_blocked()
         if globally_blocked:
             print(f"🛑 [{agent_id}] Соц. блок — {self.get_social_block_reason()}")
 
-        for rule in self.rules:
-            rule_name = rule['name']
+        # ════════════════════════════════════════════════════════════
+        # 3. LLM-генерация желаний личности (заменяет rule-based rules)
+        # ════════════════════════════════════════════════════════════
+        # Вызываем LLM не чаще раза в llm_cooldown_seconds,
+        # и только если нет ни одного активного несоциального желания.
+        has_active_nonsocial = any(
+            d.status in [DesireStatus.ACTIVE, DesireStatus.PURSUED]
+            and d.motivation_type != MotivationType.SOCIAL
+            for d in current_desires
+        )
 
-            if current_time - self.rule_last_triggered.get(rule_name, 0) < self.rule_cooldown_seconds:
-                continue
-            if self._has_similar_active_desire(current_desires, rule_name):
-                continue
-            if not rule['condition'](personality, emotions, beliefs_base):
-                continue
+        should_call_llm = (
+            self.llm is not None
+            and not has_active_nonsocial
+            and (current_time - self._llm_last_called) >= self.llm_cooldown_seconds
+        )
 
-            desire = self._create_desire_from_template(
-                rule['desire_template'], personality, emotions, beliefs_base, agent_id
-            )
+        if should_call_llm:
+            try:
+                llm_raw = self.llm.generate_dynamic_desires(
+                    agent_name=agent_name or agent_id,
+                    agent_id=agent_id,
+                    personality=personality,
+                    emotions=emotions,
+                    social_battery=social_battery,
+                    perceptions=perceptions or []
+                )
+                self._llm_last_called = current_time
 
-            # Социальное желание заблокировано в период отдыха
-            if desire.motivation_type == MotivationType.SOCIAL:
-                if globally_blocked:
-                    continue
-                target = desire.context.get('target_agent')
-                # Нет цели или цель на кулдауне — пропускаем
-                if not target or self.is_on_cooldown(target):
-                    continue
+                for item in (llm_raw or []):
+                    desc = item.get('description', '').strip()
+                    if not desc:
+                        continue
 
-            new_desires.append(desire)
-            self.rule_last_triggered[rule_name] = current_time
+                    # Не дублируем уже существующие желания
+                    already_exists = any(
+                        d.description.lower() == desc.lower()
+                        and d.status in [DesireStatus.ACTIVE, DesireStatus.PURSUED]
+                        for d in current_desires + new_desires
+                    )
+                    if already_exists:
+                        continue
 
-        # ============================================================
-        # 3. Idle Drive — автономное действие когда пул пуст
-        # ============================================================
-        # Если нет ни одного активного/pursued желания (кроме incoming_message)
-        # и ничего нового не сгенерировалось — подкидываем фоновое несоциальное желание.
-        # Это гарантирует что агент всегда чем-то занят, а не зависает в ожидании диалога.
+                    raw_mtype = item.get('motivation_type', 'curiosity').lower()
+                    mtype = _MOTIVATION_MAP.get(raw_mtype, MotivationType.CURIOSITY)
+
+                    # social желание заблокировано во время отдыха
+                    if mtype == MotivationType.SOCIAL and globally_blocked:
+                        print(f"🛑 [{agent_id}] LLM social desire заблокировано — {desc[:30]}")
+                        continue
+
+                    # При низкой батарейке принудительно меняем SOCIAL → SAFETY
+                    if mtype == MotivationType.SOCIAL and social_battery < 0.2:
+                        print(f"🔋 [{agent_id}] Battery low: меняем SOCIAL → SAFETY для '{desc[:30]}'")
+                        mtype = MotivationType.SAFETY
+
+                    # Для SOCIAL желаний ищем свободного партнёра
+                    ctx = dict(item.get('context', {}) or {})
+                    if mtype == MotivationType.SOCIAL:
+                        target = self._find_available_agent(beliefs_base, agent_id)
+                        if target:
+                            ctx['target_agent'] = target
+                            ctx['topic'] = ctx.get('topic') or self._pick_topic(personality)
+                            ctx['intent'] = 'chat'
+                        # Нет свободного партнёра — пропускаем социальное желание
+                        if not ctx.get('target_agent'):
+                            continue
+                        # Проверяем cooldown на конкретного партнёра
+                        if self.is_on_cooldown(ctx['target_agent']):
+                            continue
+
+                    desire = Desire(
+                        description=desc,
+                        priority=float(item.get('priority', 0.5)),
+                        urgency=float(item.get('urgency', 0.5)),
+                        motivation_type=mtype,
+                        source='llm_dynamic',
+                        personality_alignment=0.75,
+                        status=DesireStatus.ACTIVE,
+                        context=ctx
+                    )
+                    new_desires.append(desire)
+
+            except Exception as e:
+                # Fallback при ошибке LLM — агент задумывается
+                print(f"⚠️ [{agent_id}] LLM desire generation failed: {e}. Fallback → THINK")
+                new_desires.append(Desire(
+                    description='Задуматься о происходящем',
+                    motivation_type=MotivationType.CURIOSITY,
+                    priority=0.3, urgency=0.2,
+                    source='llm_fallback',
+                    personality_alignment=0.5,
+                    status=DesireStatus.ACTIVE,
+                    context={'action': 'think', 'topic': 'general'}
+                ))
+
+        # ════════════════════════════════════════════════════════════
+        # 4. Idle Drive — когда пул желаний полностью пуст
+        # ════════════════════════════════════════════════════════════
         all_active = [
             d for d in current_desires + new_desires
             if d.status in [DesireStatus.ACTIVE, DesireStatus.PURSUED]
@@ -417,7 +382,6 @@ class DesireGenerator:
         )
         if not has_non_social_active:
             idle = self._generate_idle_desire(agent_id, personality)
-            # Не дублируем — проверяем по описанию
             already_idle = any(
                 d.description == idle.description
                 and d.status in [DesireStatus.ACTIVE, DesireStatus.PURSUED]
@@ -425,20 +389,16 @@ class DesireGenerator:
             )
             if not already_idle:
                 new_desires.append(idle)
-                print(f"💤 [{agent_id}] Idle Drive: «{idle.description}» (соц. блок: {globally_blocked})")
+                print(f"💤 [{agent_id}] Idle Drive: «{idle.description}» "
+                      f"(соц. блок: {globally_blocked})")
 
         return new_desires
 
-    def _generate_idle_desire(self, agent_id: str, personality: Dict[str, float] = None) -> Desire:
-        """
-        Idle Drive: фоновое несоциальное желание когда пул пуст.
-        Выбор опции зависит от черт личности агента.
-        Приоритет 0.15: любое настоящее событие или правило перебьёт его.
-        """
-        import random
-        p = personality or {}
+    # ── Вспомогательные методы ────────────────────────────────────────
 
-        # Пулы опций по типу личности
+    def _generate_idle_desire(self, agent_id: str, personality: Dict[str, float] = None) -> Desire:
+        """Фоновое несоциальное желание когда пул пуст."""
+        p = personality or {}
         curious_options = [
             {'description': 'Изучить что-то новое в округе',
              'motivation_type': MotivationType.CURIOSITY,
@@ -478,7 +438,6 @@ class DesireGenerator:
 
         openness = p.get('openness', 0.5)
         conscientiousness = p.get('conscientiousness', 0.5)
-
         if openness > 0.7:
             pool = curious_options
         elif conscientiousness > 0.7:
@@ -489,51 +448,12 @@ class DesireGenerator:
         chosen = random.choice(pool)
         return Desire(
             description=chosen['description'],
-            priority=0.15,
-            urgency=0.1,
+            priority=0.15, urgency=0.1,
             motivation_type=chosen['motivation_type'],
             source='idle_drive',
             personality_alignment=0.5,
             status=DesireStatus.ACTIVE,
             context={**chosen['context'], 'is_idle': True}
-        )
-
-    def _create_desire_from_template(
-        self, template: Dict, personality: Dict, emotions: Dict, beliefs_base, agent_id: str
-    ) -> Desire:
-        source = template.get('source', 'unknown')
-        alignment = 0.7
-        if 'extraversion' in source:
-            alignment = personality.get('extraversion', 0.5)
-        elif 'introversion' in source:
-            alignment = 1.0 - personality.get('extraversion', 0.5)
-        elif 'openness' in source:
-            alignment = personality.get('openness', 0.5)
-        elif 'agreeableness' in source:
-            alignment = personality.get('agreeableness', 0.5)
-        elif 'conscientiousness' in source:
-            alignment = personality.get('conscientiousness', 0.5)
-
-        context = {}
-        motivation = template.get('motivation_type', MotivationType.SOCIAL)
-        if motivation == MotivationType.SOCIAL:
-            target = self._find_available_agent(beliefs_base, agent_id)
-            if target:
-                context = {
-                    'target_agent': target,
-                    'topic': self._pick_topic(personality),
-                    'intent': 'chat'
-                }
-
-        return Desire(
-            description=template['description'],
-            priority=template.get('priority', 0.5),
-            urgency=template.get('urgency', 0.5),
-            motivation_type=motivation,
-            source=template.get('source', 'generated'),
-            personality_alignment=alignment,
-            status=DesireStatus.ACTIVE,
-            context=context
         )
 
     def _find_available_agent(self, beliefs_base, self_id: str) -> Optional[str]:
@@ -566,10 +486,10 @@ class DesireGenerator:
         )
         return random.choice(topics)
 
-    def _has_similar_active_desire(self, desires: List[Desire], rule_name: str) -> bool:
+    def _has_similar_active_desire(self, desires: List[Desire], source: str) -> bool:
         return any(
             d.status in [DesireStatus.ACTIVE, DesireStatus.PURSUED]
-            and d.source in (f"personality_{rule_name}", rule_name)
+            and d.source in (f"personality_{source}", source, 'llm_dynamic')
             for d in desires
         )
 
