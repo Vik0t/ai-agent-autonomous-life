@@ -162,6 +162,7 @@ class LLMInterface:
     Your response (in character, {agent_name}):"""
         
         try:
+            print(f"User prompt for {agent_name} ({message_type}):\n{user_prompt}")
             response = self.client.chat.completions.create(
                 model="openai/gpt-3.5-turbo",
                 messages=[

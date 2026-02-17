@@ -21,11 +21,18 @@ from core.bdi.beliefs import BeliefType, Belief
 from core.bdi.deliberation import create_perception
 import uuid
 
+from database.Database import Database
+from database.social_engine import SocialEngine
+from database.memory import VectorMemory
+from database.social_types import SocialEvent, SocialEventType, SocialSentiment, SocialEventCreate, SocialEventType, SummarizeRequest
+
 
 class WorldSimulator:
     def __init__(self):
+        self.db = Database()
+
         self.agents: Dict[str, Agent] = {}
-        self.communication_hub = CommunicationHub()
+        self.communication_hub = CommunicationHub(db=self.db)
         self.llm_interface = LLMInterface()
         self.running = False
         self.time_speed = 1.0
@@ -247,12 +254,18 @@ class WorldSimulator:
                 command['intention_id'], command['step_object'], False, f"Unknown: {target_id}")
             return
 
+        # ============================================
+        # 1. Управление диалогом
+        # ============================================
         conv = self.communication_hub.get_active_conversation(agent.id, target_id)
         if not conv:
             conv = self.communication_hub.start_conversation(agent.id, target_id, topic or "general")
 
         ctx_msgs = conv.get_context_for_agent(agent.id, max_messages=5)
 
+        # ============================================
+        # 2. Генерация контента через LLM
+        # ============================================
         content = self.llm_interface.generate_dialogue(
             agent_name=agent.name,
             personality=agent.personality.dict(),
@@ -262,31 +275,140 @@ class WorldSimulator:
             incoming_message=incoming
         )
 
+        # ============================================
+        # 3. Создание сообщения
+        # ============================================
         type_map = {
-            "greeting": MessageType.GREETING, "question": MessageType.QUESTION,
-            "answer": MessageType.ANSWER, "statement": MessageType.STATEMENT,
+            "greeting": MessageType.GREETING, 
+            "question": MessageType.QUESTION,
+            "answer": MessageType.ANSWER, 
+            "statement": MessageType.STATEMENT,
             "farewell": MessageType.FAREWELL,
         }
         msg = Message(
-            id=str(uuid.uuid4()), sender_id=agent.id, receiver_id=target_id,
-            content=content, message_type=type_map.get(msg_type_str, MessageType.STATEMENT),
-            conversation_id=conv.id, topic=topic,
-            requires_response=requires_response, response_timeout=timeout,
-            tone=tone, in_reply_to=in_reply_to
+            id=str(uuid.uuid4()), 
+            sender_id=agent.id, 
+            receiver_id=target_id,
+            content=content, 
+            message_type=type_map.get(msg_type_str, MessageType.STATEMENT),
+            conversation_id=conv.id, 
+            topic=topic,
+            requires_response=requires_response, 
+            response_timeout=timeout,
+            tone=tone, 
+            in_reply_to=in_reply_to
         )
-        await self.communication_hub.send_message(msg)
+        
+        # ============================================
+        # 5. СОХРАНЕНИЕ В БАЗУ ДАННЫХ
+        # ============================================
+        try:
+            emotion_str = agent.emotions.get_emotion_label()  # "happy", "sad", "angry", etc.
 
+            # Сохранить в таблицу messages
+            message_id = self.db.send_message(
+                sender_id=agent.id,
+                receiver_id=target_id,
+                content=content,
+                message_type="direct",
+                emotion=emotion_str  # Текущее настроение агента
+            )
+            
+            # Добавить в векторную память отправителя
+            memory = VectorMemory(self.db)
+            
+            memory.add_episodic_memory(
+                agent_id=agent.id,
+                event_description=f"{agent.name} сказал {self.agents[target_id].name}: {content}",
+                event_type="chat",
+                emotion=emotion_str,
+                importance=5,  # Средняя важность для обычного сообщения
+                participants=[target_id]
+            )
+            
+            # Добавить в память получателя (как наблюдение)
+            memory.add_episodic_memory(
+                agent_id=target_id,
+                event_description=f"{agent.name} сказал мне: {content}",
+                event_type="chat",
+                emotion="neutral",  # Получатель пока не реагировал
+                importance=5,
+                participants=[agent.id]
+            )
+            
+            print(f"💾 Сообщение сохранено в БД (ID: {message_id})")
+            
+        except Exception as e:
+            print(f"⚠️  Ошибка сохранения в БД: {e}")
+            # Продолжаем выполнение даже при ошибке БД
+
+        # ============================================
+        # 6. Логирование и обновление отношений
+        # ============================================
         tname = self.agents[target_id].name
         print(f"💬 {agent.name} → {tname} [{msg_type_str}]: {content}")
-        self._log_event("message", f"{agent.name} → {tname}: {content}",
-                        [agent.id, target_id],
-                        {"message_id": msg.id, "conversation_id": conv.id,
-                         "message_type": msg_type_str, "content": content,
-                         "sender_name": agent.name, "receiver_name": tname})
+        
+        self._log_event(
+            "message", 
+            f"{agent.name} → {tname}: {content}",
+            [agent.id, target_id],
+            {
+                "message_id": msg.id, 
+                "conversation_id": conv.id,
+                "message_type": msg_type_str, 
+                "content": content,
+                "sender_name": agent.name, 
+                "receiver_name": tname
+            }
+        )
+        
+        # ============================================
+        # 7. ОБНОВЛЕНИЕ СОЦИАЛЬНЫХ ОТНОШЕНИЙ
+        # ============================================
+        try:
+            
+            social = SocialEngine(self.db)
+            
+            # Определить sentiment из тона и типа сообщения
+            sentiment_map = {
+                "friendly": SocialSentiment.POSITIVE,
+                "neutral": SocialSentiment.NEUTRAL,
+                "hostile": SocialSentiment.NEGATIVE,
+                "cheerful": SocialSentiment.VERY_POSITIVE,
+                "angry": SocialSentiment.VERY_NEGATIVE
+            }
+            sentiment = sentiment_map.get(tone, SocialSentiment.NEUTRAL)
+            
+            # Создать социальное событие
+            social_event = SocialEvent(
+                event_type=SocialEventType.COMMUNICATE,
+                agent_from=agent.id,
+                agent_to=target_id,
+                sentiment=sentiment,
+                description=f"{agent.name} общается с {tname}: {content[:50]}..."
+            )
+            
+            social.process_social_event(social_event)
+            
+            rel = social.get_relationship(agent.id, target_id)
+            print(f"👥 Отношение {agent.name} → {tname}: Affinity={rel.affinity:.2f}, Trust={rel.trust:.2f}")
+            
+        except Exception as e:
+            print(f"⚠️  Ошибка обновления Social Engine: {e}")
+        
+        # Старая система отношений (можно убрать после миграции на Social Engine)
         self._update_relationship(agent.id, target_id, 0.03)
+        
+        # ============================================
+        # 8. Подтверждение выполнения действия
+        # ============================================
         agent.confirm_action_execution(
-            command['intention_id'], command['step_object'], True,
-            f"Sent [{msg_type_str}]: {content[:50]}")
+            command['intention_id'], 
+            command['step_object'], 
+            True,
+            f"Sent [{msg_type_str}]: {content[:50]}"
+        )
+
 
     async def _do_wait(self, agent: Agent, params: Dict, command: Dict):
         expected_from = params.get("expected_from")

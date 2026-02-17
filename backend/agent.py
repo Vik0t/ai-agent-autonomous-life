@@ -29,6 +29,18 @@ class Emotion(BaseModel):
     fear: float = 0.0
     surprise: float = 0.0
     disgust: float = 0.0
+    def get_emotion_label(self) -> str:
+        emotions = {
+            "happy": self.happiness,
+            "sad": self.sadness,
+            "angry": self.anger,
+            "fearful": self.fear,
+            "surprised": self.surprise,
+            "disgusted": self.disgust
+        }
+        # Получаем эмоцию с наибольшим значением
+        dominant_emotion = max(emotions, key=emotions.get)
+        return dominant_emotion
 
 
 class Agent:
