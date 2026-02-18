@@ -617,7 +617,23 @@ const App = () => {
         // Set up listener for world state updates
         const handleWorldState = (worldState) => {
             if (worldState.agents) {
+                // Update global agents data
+                window.agentsData = worldState.agents;
                 setAgents(worldState.agents);
+                
+                // If we're in group chat view, update selected agents
+                if (window.currentView === 'group-chat' && window.selectedAgents.length > 0) {
+                    // Map the selected agents to the new real agents
+                    const updatedSelectedAgents = window.selectedAgents.map(selectedAgent => {
+                        // Find the corresponding real agent
+                        const realAgent = worldState.agents.find(agent =>
+                            agent.name === selectedAgent.name ||
+                            agent.id == selectedAgent.id
+                        );
+                        return realAgent || selectedAgent;
+                    });
+                    window.selectedAgents = updatedSelectedAgents;
+                }
             }
             
             // Convert recent events to display format
@@ -734,11 +750,6 @@ const App = () => {
     // Отображение страницы чатов
     if (window.currentView === 'chat') {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'chat',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement(ChatView, {
                 onBack: () => window.setView('dashboard')
             })

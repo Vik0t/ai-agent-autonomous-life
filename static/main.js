@@ -280,7 +280,7 @@ function updateAgentData(agents) {
         }));
         
         // Refresh the UI if we're on the agents view
-        if (window.currentView === 'agents') {
+        if (window.currentView === 'agents' || window.currentView === 'group-chat') {
             const root = ReactDOM.createRoot(document.getElementById('root'));
             root.render(React.createElement(App));
         }
@@ -312,7 +312,7 @@ function updateMessagesFromWebSocket(recentMessages) {
                 window.messages[msg.sender_id].push(frontendMessage);
                 
                 // Refresh UI if we're on the chat view
-                if (window.currentView === 'chat') {
+                if (window.currentView === 'chat' || window.currentView === 'group-chat') {
                     const root = ReactDOM.createRoot(document.getElementById('root'));
                     root.render(React.createElement(App));
                 }
@@ -345,7 +345,8 @@ function addAgentMessage(message) {
     
     // Refresh UI if we're on the chat view or specific agent chat
     if (window.currentView === 'chat' ||
-        (window.currentView === 'agent' && window.selectedAgent && window.selectedAgent.id == message.sender_id)) {
+        (window.currentView === 'agent' && window.selectedAgent && window.selectedAgent.id == message.sender_id) ||
+        (window.currentView === 'group-chat' && window.selectedAgents.some(agent => agent.id == message.sender_id))) {
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(React.createElement(App));
     }
