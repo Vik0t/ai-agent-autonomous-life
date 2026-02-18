@@ -36,5 +36,9 @@ ENV/
 .DS_Store
 Thumbs.db
 
+#Database
+chroma_data/
+agents.db
+
 # Environment variables
 .env
