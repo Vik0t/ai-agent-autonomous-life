@@ -24,11 +24,19 @@ from core.bdi.beliefs import BeliefType, Belief
 from core.bdi.deliberation import create_perception
 import uuid
 
+from database.Database import Database
+from database.social_engine import SocialEngine
+from database.memory import VectorMemory
+from database.social_types import SocialEvent, SocialEventType, SocialSentiment, SocialEventCreate, SocialEventType, SummarizeRequest
+
+
 
 class WorldSimulator:
     def __init__(self):
+        self.db = Database()
+
         self.agents: Dict[str, Agent] = {}
-        self.communication_hub = CommunicationHub()
+        self.communication_hub = CommunicationHub(db=self.db)
         self.llm_interface = LLMInterface()
         self.running = False
         self.time_speed = 1.0
@@ -54,6 +62,7 @@ class WorldSimulator:
             "description": description, "agent_ids": agent_ids or [],
             "data": data or {}, "timestamp": time.time()
         }
+        self.db.add_event(event)
         self.event_log.append(event)
         if len(self.event_log) > 500:
             self.event_log = self.event_log[-500:]
@@ -415,7 +424,7 @@ class WorldSimulator:
                     f"Skipped [{msg_type_str}] — conversation already closed")
                 return
 
-        ctx_msgs = conv.get_context_for_agent(agent.id, max_messages=5)
+        ctx_msgs = conv.get_context_for_agent(agent.id, max_messages=5, db=self.db)
 
         content = self.llm_interface.generate_dialogue(
             agent_name=agent.name,
