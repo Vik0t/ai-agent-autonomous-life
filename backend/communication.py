@@ -15,6 +15,11 @@ import asyncio
 import time
 import uuid
 
+from database.Database import Database
+from database.social_engine import SocialEngine
+from database.memory import VectorMemory
+from database.social_types import SocialEvent, SocialEventType, SocialSentiment, SocialEventCreate, SocialEventType, SummarizeRequest
+
 
 class MessageType(Enum):
     """Типы сообщений в диалоге"""
@@ -37,34 +42,35 @@ class ConversationStatus(Enum):
 @dataclass
 class Message:
     """
-    Улучшенное сообщение с контекстом диалога
+    Сообщение (объект для работы в коде).
+    Персистентность — только через БД.
     """
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     sender_id: str = ""
     receiver_id: str = ""
     content: str = ""
-    
+
     # Тип и контекст
     message_type: MessageType = MessageType.STATEMENT
     conversation_id: Optional[str] = None
-    in_reply_to: Optional[str] = None  # ID сообщения на которое отвечаем
-    
+    in_reply_to: Optional[str] = None
+
     # Эмоциональный окрас
-    emotion: Optional[str] = None  # "happy", "curious", "concerned"
-    tone: str = "neutral"  # "friendly", "formal", "casual"
-    
+    emotion: Optional[str] = None
+    tone: str = "neutral"
+
     # Тема разговора
     topic: Optional[str] = None
-    
+
     # Временные метки
     timestamp: float = field(default_factory=time.time)
     delivered_at: Optional[float] = None
     read_at: Optional[float] = None
-    
+
     # Ожидание ответа
     requires_response: bool = False
     response_timeout: float = 30.0
-    
+
     def to_dict(self) -> Dict:
         """Сериализация для API/WebSocket"""
         return {
@@ -82,8 +88,64 @@ class Message:
             'delivered_at': self.delivered_at,
             'read_at': self.read_at,
             'requires_response': self.requires_response,
-            'response_timeout': self.response_timeout
+            'response_timeout': self.response_timeout,
         }
+
+    @classmethod
+    def from_db_row(cls, row: Dict) -> 'Message':
+        """
+        Создать Message из строки БД.
+
+        Args:
+            row: sqlite3.Row, преобразованный в dict
+        """
+        if not isinstance(row, dict):
+            try:
+                row = dict(row)
+            except Exception:
+                return cls(content="[error loading message]")
+
+        type_mapping = {
+            'greeting':  MessageType.GREETING,
+            'question':  MessageType.QUESTION,
+            'answer':    MessageType.ANSWER,
+            'statement': MessageType.STATEMENT,
+            'farewell':  MessageType.FAREWELL,
+            'ack':       MessageType.ACKNOWLEDGMENT,
+            'direct':    MessageType.STATEMENT,
+            'broadcast': MessageType.STATEMENT,
+            'system':    MessageType.STATEMENT,
+        }
+        message_type = type_mapping.get(row.get('message_type', 'direct'), MessageType.STATEMENT)
+
+        timestamp_str = row.get('timestamp')
+        if timestamp_str:
+            try:
+                dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                timestamp = dt.timestamp()
+            except Exception:
+                timestamp = time.time()
+        else:
+            timestamp = time.time()
+
+        try:
+            return cls(
+                id=str(row.get('id', uuid.uuid4())),
+                sender_id=row.get('sender_id', ''),
+                receiver_id=row.get('receiver_id', ''),
+                content=row.get('content', ''),
+                message_type=message_type,
+                emotion=row.get('emotion'),
+                tone=row.get('tone', 'neutral'),
+                topic=row.get('topic'),
+                timestamp=timestamp,
+                conversation_id=row.get('conversation_id'),
+                in_reply_to=row.get('parent_message_id'),
+            )
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            raise
 
 
 @dataclass
@@ -160,8 +222,8 @@ class CommunicationHub:
     Центр коммуникации с поддержкой диалогов
     """
     
-    def __init__(self):
-        # Оригинальные компоненты
+    def __init__(self, db: Database):
+        self.db = db        # Оригинальные компоненты
         self.messages: List[Message] = []
         self.agent_connections: Dict[str, asyncio.Queue] = {}
         
@@ -224,6 +286,20 @@ class CommunicationHub:
         """Получить диалог по ID"""
         return self.conversations.get(conversation_id)
     
+    def get_conversation_history(self, agent1_id: str, agent2_id: str, limit: int = 50) -> List[Message]:
+        """Загрузить историю диалога из БД."""
+        db_messages = self.db.get_conversation(agent1_id, agent2_id, limit)
+        return [
+            Message(
+                id=str(db_msg.get('id', uuid.uuid4())),
+                sender_id=db_msg['sender_id'],
+                receiver_id=db_msg.get('receiver_id', ''),
+                content=db_msg['content'],
+                message_type=MessageType.STATEMENT,
+                emotion=db_msg.get('emotion'),
+            )
+            for db_msg in db_messages
+        ]
     def is_agent_in_conversation(self, agent_id: str) -> bool:
         """
         Проверить занят ли агент активным диалогом
@@ -262,6 +338,14 @@ class CommunicationHub:
         Отправить сообщение (улучшенная версия)
         """
         self.messages.append(message)
+        self.db.send_message(
+            sender_id=message.sender_id,
+            receiver_id=message.receiver_id,
+            content=message.content,
+            message_type="direct",  
+            emotion=message.emotion,
+            parent_message_id=message.in_reply_to,
+        )
         
         # Если сообщение в контексте диалога - добавляем его туда
         if message.conversation_id:
@@ -322,8 +406,16 @@ class CommunicationHub:
     # ========================================
     
     def get_recent_messages(self, limit: int = 10) -> List[Message]:
-        """Получить последние сообщения в системе"""
-        return self.messages[-limit:] if self.messages else []
+        """Получить последние сообщения из БД"""
+        cursor = self.db.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM messages
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (limit,))
+        
+        return [Message.from_db_row(dict(row)) for row in cursor.fetchall()]
+
     
     def get_all_active_conversations(self) -> List[Conversation]:
         """Получить все активные диалоги"""
