@@ -6,6 +6,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize WebSocket connection
     initializeWebSocket();
     
+    // Initialize header
+    initializeHeader();
+    
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(React.createElement(App));
 });
@@ -51,6 +54,19 @@ window.setView = (view, agent = null, agents = null) => {
     // Перерисовываем приложение
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(React.createElement(App));
+    
+    // Update navigation in header
+    const navContainer = document.getElementById('nav-container');
+    if (navContainer) {
+        const navElement = React.createElement(Navigation, {
+            currentPage: window.currentView,
+            onNavigate: (page) => {
+                window.setView(page);
+            }
+        });
+        const navRoot = ReactDOM.createRoot(navContainer);
+        navRoot.render(navElement);
+    }
 };
 
 // Функция для отправки сообщения агенту
@@ -363,4 +379,34 @@ function getAgentAvatar(name) {
     const avatars = ['🤖', '👾', '🦾', '👽', '👻', '🧠', '💻', '📱'];
     const index = name.charCodeAt(0) % avatars.length;
     return avatars[index];
+}
+
+// Initialize header with title and navigation
+function initializeHeader() {
+    // Create title element
+    const titleContainer = document.getElementById('title-container');
+    if (titleContainer) {
+        const title = document.createElement('h1');
+        title.className = 'glitch-text';
+        title.setAttribute('data-text', 'КИБЕР РЫВОК');
+        title.textContent = 'КИБЕР РЫВОК';
+        titleContainer.appendChild(title);
+        
+        const subtitle = document.createElement('p');
+        subtitle.textContent = 'Симулятор AI-Агентов';
+        titleContainer.appendChild(subtitle);
+    }
+    
+    // Create navigation element
+    const navContainer = document.getElementById('nav-container');
+    if (navContainer) {
+        const navElement = React.createElement(Navigation, {
+            currentPage: window.currentView,
+            onNavigate: (page) => {
+                window.setView(page);
+            }
+        });
+        const navRoot = ReactDOM.createRoot(navContainer);
+        navRoot.render(navElement);
+    }
 }
