@@ -30,7 +30,7 @@ class LLMInterface:
             )
 
         # Модель по умолчанию — быстрая и бесплатная
-        self._model = "openai/gpt-3.5-turbo"
+        self._model = "qwen/qwen3-next-80b-a3b-instruct:free"
 
     # ──────────────────────────────────────────────────────────────────
     # Утилиты форматирования

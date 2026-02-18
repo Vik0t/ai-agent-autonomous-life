@@ -7,6 +7,7 @@ import os
 import sys
 import asyncio
 import time
+import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,14 +29,15 @@ from database.social_types import SocialEvent, SocialEventType, SocialSentiment,
 
 simulator = WorldSimulator()
 active_connections: list[WebSocket] = []
-
+print("📁 Инициализация базы данных...")
+db = Database()
 async def broadcast_state():
     while True:
         try:
             if active_connections:
                 agents_data = [agent.to_dict() for agent in simulator.agents.values()]
                 recent_msgs = simulator.communication_hub.get_recent_messages(10)
-                recent_events = simulator.get_recent_events(20)
+                recent_events = db.get_events(20)
                 relationships = simulator.get_relationships_data()
 
                 state = jsonable_encoder({
@@ -73,6 +75,40 @@ async def broadcast_state():
             print(f"❌ Broadcast error: {e}")
             await asyncio.sleep(1)
 
+def load_agents_from_db():
+    """
+    Загрузить агентов из БД.
+    Если БД пустая - создать дефолтных агентов.
+    """
+    existing_agents = db.get_all_agents()
+    
+    if existing_agents:
+        # Загрузить существующих агентов
+        print(f"📂 Загружаю {len(existing_agents)} агентов из БД...")
+        
+        for agent_data in existing_agents:
+            # ✅ Собрать personality из отдельных полей
+            personality = {
+                "openness": agent_data.get('openness', 0.5),
+                "conscientiousness": agent_data.get('conscientiousness', 0.5),
+                "extraversion": agent_data.get('extraversion', 0.5),
+                "agreeableness": agent_data.get('agreeableness', 0.5),
+                "neuroticism": agent_data.get('neuroticism', 0.5)
+            }
+            
+            # Создать объект Agent
+            agent = Agent(
+                agent_id=agent_data['id'],
+                name=agent_data['name'],
+                avatar=agent_data.get('avatar', '🤖'),
+                personality_data=personality,
+                llm_interface=simulator.llm_interface
+            )
+            
+            # Добавить в симулятор
+            simulator.add_agent(agent)
+            print(f"✅ Загружен: {agent.name} ({agent.id})")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Запуск Cyber BDI Simulator...")
@@ -86,12 +122,6 @@ async def lifespan(app: FastAPI):
     # ============================================
     # 1. ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
     # ============================================
-    print("📁 Инициализация базы данных...")
-    db = Database()
-    
-    # Создать тестовых агентов в БД
-    db.add_agent("agent-0", "Алекса", "🤖, экстраверт, дружелюбная")
-    db.add_agent("agent-1", "Нексус", "👾, аналитичный, осторожный")
     
     # Добавить начальные отношения
     social = SocialEngine(db)
@@ -99,35 +129,10 @@ async def lifespan(app: FastAPI):
     
     print("✅ База данных готова!")
     
-    # ============================================
-    # 2. ИНИЦИАЛИЗАЦИЯ АГЕНТОВ
-    # ============================================
-    configs = [
-        (
-            "agent-0", "Алекса", "🤖",
-            {
-                "openness": 0.85,
-                "conscientiousness": 0.6,
-                "extraversion": 0.9,
-                "agreeableness": 0.8,
-                "neuroticism": 0.2
-            }
-        ),
-        (
-            "agent-1", "Нексус", "👾",
-            {
-                "openness": 0.7,
-                "conscientiousness": 0.8,
-                "extraversion": 0.45,
-                "agreeableness": 0.6,
-                "neuroticism": 0.5
-            }
-        ),
-    ]
-
-    for aid, name, avatar, personality in configs:
-        agent = Agent(aid, name, avatar, personality, llm_interface=simulator.llm_interface)
-        simulator.add_agent(agent)
+    # # ============================================
+    # # 2. ИНИЦИАЛИЗАЦИЯ АГЕНТОВ
+    # # ============================================
+    load_agents_from_db()
 
     # ============================================
     # 3. ЗАПУСК СИМУЛЯЦИИ
@@ -262,6 +267,18 @@ async def create_agent(data: dict = Body(...)):
         # Создаем нового агента
         agent = Agent(agent_id, name, avatar, personality, llm_interface=simulator.llm_interface)
         simulator.add_agent(agent)
+        print("agent adding")
+        db.add_agent(
+            agent_id, 
+            name, 
+            personality["openness"],           # ✅ personality["openness"]
+            personality["conscientiousness"],  # ✅ personality["conscientiousness"]
+            personality["extraversion"],       # ✅ personality["extraversion"]
+            personality["agreeableness"],      # ✅ personality["agreeableness"]
+            personality["neuroticism"],        # ✅ personality["neuroticism"]
+            avatar
+        )
+        print('agent adding fineshed')
 
         # Регистрируем агента в системе коммуникации
         simulator.communication_hub.register_agent(agent_id)

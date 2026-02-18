@@ -58,6 +58,7 @@ class WorldSimulator:
             "description": description, "agent_ids": agent_ids or [],
             "data": data or {}, "timestamp": time.time()
         }
+        self.db.add_event(event)
         self.event_log.append(event)
         if len(self.event_log) > 500:
             self.event_log = self.event_log[-500:]

@@ -28,7 +28,11 @@ class Database:
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 avatar TEXT DEFAULT '🤖',
-                personality TEXT,
+                openness FLOAT DEFAULT 0.0,
+                conscientiousness FLOAT DEFAULT 0.0,
+                extraversion FLOAT DEFAULT 0.0,
+                agreeableness FLOAT DEFAULT 0.0,
+                neuroticism FLOAT DEFAULT 0.0,
                 memory_count INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
                 last_active TEXT
@@ -86,29 +90,26 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_relationships_pair ON relationships(agent_from, agent_to)")
         
         # ============================================
-        # 4. EVENTS LOG
+        # 4. EVENTS LOG (ОБНОВЛЁННАЯ СТРУКТУРА)
         # ============================================
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS events_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
-                agent_id TEXT NOT NULL,
-                action_type TEXT NOT NULL,
+                id TEXT PRIMARY KEY,
+                type TEXT NOT NULL,
                 description TEXT NOT NULL,
-                target_agent TEXT,
-                emotion_before TEXT,
-                emotion_after TEXT,
-                metadata TEXT,
-                FOREIGN KEY (agent_id) REFERENCES agents(id)
+                agent_ids TEXT,
+                data TEXT,
+                timestamp REAL NOT NULL
             )
         """)
         
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events_log(timestamp DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events_log(type)")
         
         self.conn.commit()
         print("✅ Все таблицы инициализированы")
-    
-    # ================== МЕТОДЫ ДЛЯ ЧАТОВ ==================
+        
+        # ================== МЕТОДЫ ДЛЯ ЧАТОВ ==================
     
     def send_message(
         self,
@@ -127,14 +128,6 @@ class Database:
             VALUES (?, ?, ?, ?, ?, ?)
         """, (sender_id, receiver_id, message_type, content, emotion, parent_message_id))
         message_id = cursor.lastrowid
-        
-        # Добавить в events_log
-        description = f"{sender_id} → {receiver_id or 'все'}: {content[:50]}..."
-        cursor.execute("""
-            INSERT INTO events_log
-            (agent_id, action_type, description, target_agent, emotion_after)
-            VALUES (?, ?, ?, ?, ?)
-        """, (sender_id, "chat", description, receiver_id, emotion))
         
         self.conn.commit()
         return message_id
@@ -249,7 +242,9 @@ class Database:
     
     # ================== УПРАВЛЕНИЕ АГЕНТАМИ ==================
     
-    def add_agent(self, agent_id: str, name: str, personality: str, avatar: str = "🤖") -> bool:
+    def add_agent(self, agent_id: str, name: str, openness: float, conscientiousness: float, extraversion: float, 
+                  agreeableness: float, neuroticism: float, avatar: str = "🤖") -> bool:
+        print("Adding agent")
         """Добавить агента"""
         try:
             cursor = self.conn.cursor()
@@ -259,9 +254,11 @@ class Database:
                 return False
             
             cursor.execute("""
-                INSERT INTO agents (id, name, personality, avatar, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (agent_id, name, personality, avatar, datetime.now().isoformat()))
+                INSERT INTO agents (id, name, openness, conscientiousness, extraversion, 
+                  agreeableness, neuroticism, avatar, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (agent_id, name, openness, conscientiousness, extraversion, 
+                  agreeableness, neuroticism, avatar, datetime.now().isoformat()))
             
             self.conn.commit()
             print(f"✅ Агент {name} ({agent_id}) добавлен")
@@ -303,6 +300,295 @@ class Database:
         except Exception as e:
             print(f"❌ Ошибка удаления: {e}")
             return False
+        
+
+# ================== МЕТОДЫ ДЛЯ СОБЫТИЙ ==================
+
+    def add_event(
+        self,
+        event: Dict,
+    ) -> str:
+        """
+        Добавить событие в лог
+        
+        Args:
+            event_type: Тип события (chat, action, emotion, memory, etc.)
+            description: Описание события
+            agent_ids: Список ID агентов участвующих в событии
+            data: Дополнительные данные события (dict)
+            event_id: ID события (генерируется автоматически если не указан)
+            timestamp: Unix timestamp (текущее время если не указан)
+        
+        Returns:
+            ID созданного события
+        
+        Example:
+            >>> db.add_event(
+            ...     event_type="chat",
+            ...     description="Алекса отправила сообщение Нексусу",
+            ...     agent_ids=["agent-0", "agent-1"],
+            ...     data={"message": "Привет!", "emotion": "happy"}
+            ... )
+        """
+        import json
+        import uuid
+        import time
+        
+        # Преобразовать списки и dict в JSON
+        agent_ids_str = json.dumps(event.get("agents_ids") or [])
+        data_str = json.dumps(event.get("data") or {})
+        
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO events_log
+            (id, type, description, agent_ids, data, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            event.get("id"),
+            event.get("type"),
+            event.get("description"),
+            agent_ids_str,
+            data_str,
+            event.get("timestamp"),
+        ))
+        
+        self.conn.commit()
+        return event.get("id")
+
+
+    def get_events(
+        self,
+        limit: int = 20,
+        event_type: Optional[str] = None,
+        agent_id: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Получить события из лога
+        
+        Args:
+            limit: Максимальное количество событий
+            event_type: Фильтр по типу события (опционально)
+            agent_id: Фильтр по участвующему агенту (опционально)
+        
+        Returns:
+            Список событий в формате:
+            {
+                "id": str,
+                "type": str,
+                "description": str,
+                "agent_ids": List[str],
+                "data": Dict,
+                "timestamp": float
+            }
+        
+        Example:
+            >>> # Все последние события
+            >>> events = db.get_events(limit=10)
+            
+            >>> # События конкретного типа
+            >>> events = db.get_events(event_type="chat", limit=15)
+            
+            >>> # События с участием агента
+            >>> events = db.get_events(agent_id="agent-0", limit=5)
+        """
+        import json
+        
+        cursor = self.conn.cursor()
+        
+        # Построить запрос с фильтрами
+        query = "SELECT * FROM events_log WHERE 1=1"
+        params = []
+        
+        if event_type:
+            query += " AND type = ?"
+            params.append(event_type)
+        
+        if agent_id:
+            # Поиск агента в JSON массиве
+            query += " AND agent_ids LIKE ?"
+            params.append(f'%"{agent_id}"%')
+        
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor.execute(query, params)
+        
+        events = []
+        for row in cursor.fetchall():
+            event = dict(row)
+            
+            # Парсинг JSON полей
+            try:
+                event['agent_ids'] = json.loads(event.get('agent_ids', '[]'))
+            except:
+                event['agent_ids'] = []
+            
+            try:
+                event['data'] = json.loads(event.get('data', '{}'))
+            except:
+                event['data'] = {}
+            
+            events.append(event)
+        
+        return events
+
+
+    def get_agent_events(self, agent_id: str, limit: int = 20) -> List[Dict]:
+        """
+        Получить все события агента
+        
+        Args:
+            agent_id: ID агента
+            limit: Максимальное количество событий
+        
+        Returns:
+            Список событий
+        """
+        return self.get_events(limit=limit, agent_id=agent_id)
+
+
+    def get_events_by_type(self, event_type: str, limit: int = 20) -> List[Dict]:
+        """
+        Получить события определённого типа
+        
+        Args:
+            event_type: Тип события (chat, action, emotion, etc.)
+            limit: Максимальное количество
+        
+        Returns:
+            Список событий
+        """
+        return self.get_events(limit=limit, event_type=event_type)
+
+
+    def get_event_by_id(self, event_id: str) -> Optional[Dict]:
+        """
+        Получить событие по ID
+        
+        Args:
+            event_id: ID события
+        
+        Returns:
+            Событие или None если не найдено
+        """
+        import json
+        
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM events_log WHERE id = ?", (event_id,))
+        
+        row = cursor.fetchone()
+        if not row:
+            return None
+        
+        event = dict(row)
+        
+        # Парсинг JSON полей
+        try:
+            event['agent_ids'] = json.loads(event.get('agent_ids', '[]'))
+        except:
+            event['agent_ids'] = []
+        
+        try:
+            event['data'] = json.loads(event.get('data', '{}'))
+        except:
+            event['data'] = {}
+        
+        return event
+
+
+    def count_events(
+        self,
+        event_type: Optional[str] = None,
+        agent_id: Optional[str] = None
+    ) -> int:
+        """
+        Подсчитать количество событий
+        
+        Args:
+            event_type: Фильтр по типу (опционально)
+            agent_id: Фильтр по агенту (опционально)
+        
+        Returns:
+            Количество событий
+        """
+        cursor = self.conn.cursor()
+        
+        query = "SELECT COUNT(*) as count FROM events_log WHERE 1=1"
+        params = []
+        
+        if event_type:
+            query += " AND type = ?"
+            params.append(event_type)
+        
+        if agent_id:
+            query += " AND agent_ids LIKE ?"
+            params.append(f'%"{agent_id}"%')
+        
+        cursor.execute(query, params)
+        return cursor.fetchone()['count']
+
+
+    def delete_event(self, event_id: str) -> bool:
+        """
+        Удалить событие по ID
+        
+        Args:
+            event_id: ID события
+        
+        Returns:
+            True если удалено, False если не найдено
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM events_log WHERE id = ?", (event_id,))
+        self.conn.commit()
+        
+        return cursor.rowcount > 0
+
+
+    def delete_old_events(self, older_than_seconds: int = 604800) -> int:
+        """
+        Удалить старые события
+        
+        Args:
+            older_than_seconds: Удалить события старше N секунд (по умолчанию 7 дней)
+        
+        Returns:
+            Количество удалённых событий
+        """
+        import time
+        
+        cutoff_timestamp = time.time() - older_than_seconds
+        
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            DELETE FROM events_log
+            WHERE timestamp < ?
+        """, (cutoff_timestamp,))
+        
+        deleted_count = cursor.rowcount
+        self.conn.commit()
+        
+        print(f"🗑️  Удалено {deleted_count} старых событий")
+        return deleted_count
+
+
+    def clear_all_events(self) -> int:
+        """
+        Удалить все события (осторожно!)
+        
+        Returns:
+            Количество удалённых событий
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) as count FROM events_log")
+        count = cursor.fetchone()['count']
+        
+        cursor.execute("DELETE FROM events_log")
+        self.conn.commit()
+        
+        print(f"🗑️  Удалено всех событий: {count}")
+        return count
+
     
     # ================== ВСПОМОГАТЕЛЬНЫЕ ==================
     
