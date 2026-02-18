@@ -67,13 +67,6 @@ const generateMockAgents = () => {
     }));
 };
 
-// Компонент заголовка
-const Header = () => (
-    React.createElement('header', { className: 'header' },
-        React.createElement('h1', { className: 'glitch-text', 'data-text': 'КИБЕР РЫВОК' }, 'КИБЕР РЫВОК'),
-        React.createElement('p', null, 'Симулятор автономных AI-агентов // Версия 2.0.77')
-    )
-);
 
 // Компонент карточки агента
 const AgentCard = ({ agent, isSelected, onClick }) => {
@@ -617,7 +610,23 @@ const App = () => {
         // Set up listener for world state updates
         const handleWorldState = (worldState) => {
             if (worldState.agents) {
+                // Update global agents data
+                window.agentsData = worldState.agents;
                 setAgents(worldState.agents);
+                
+                // If we're in group chat view, update selected agents
+                if (window.currentView === 'group-chat' && window.selectedAgents.length > 0) {
+                    // Map the selected agents to the new real agents
+                    const updatedSelectedAgents = window.selectedAgents.map(selectedAgent => {
+                        // Find the corresponding real agent
+                        const realAgent = worldState.agents.find(agent =>
+                            agent.name === selectedAgent.name ||
+                            agent.id == selectedAgent.id
+                        );
+                        return realAgent || selectedAgent;
+                    });
+                    window.selectedAgents = updatedSelectedAgents;
+                }
             }
             
             // Convert recent events to display format
@@ -712,14 +721,15 @@ const App = () => {
         )
     ];
 
+    // Create navigation component to be used in header
+    const navigationComponent = React.createElement(Navigation, {
+        currentPage: window.currentView,
+        onNavigate: (page) => window.setView(page)
+    });
+
     // Отображение страницы профиля агента
     if (window.currentView === 'agent-profile' && window.selectedAgent) {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'agent-profile',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement(AgentProfile, {
                 agent: window.selectedAgent,
                 onBack: () => window.setView('agents'),
@@ -734,11 +744,6 @@ const App = () => {
     // Отображение страницы чатов
     if (window.currentView === 'chat') {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'chat',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement(ChatView, {
                 onBack: () => window.setView('dashboard')
             })
@@ -748,11 +753,6 @@ const App = () => {
     // Отображение страницы аналитики
     if (window.currentView === 'analytics') {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'analytics',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement(Analytics, {
                 onBack: () => window.setView('dashboard')
             })
@@ -762,11 +762,6 @@ const App = () => {
     // Отображение страницы создания агента
     if (window.currentView === 'create-agent') {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'create-agent',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement(AgentCreator, {
                 onBack: () => window.setView('dashboard'),
                 onCreateAgent: (agent) => {
@@ -787,11 +782,6 @@ const App = () => {
     if (window.currentView === 'agents') {
         // Отображение списка агентов
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'agents',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement('div', { className: 'dashboard' },
                 React.createElement('div', { className: 'panel agents-panel' },
                     React.createElement('div', { className: 'panel-corner panel-corner-tl' }),
@@ -810,11 +800,6 @@ const App = () => {
     // Отображение группового чата
     if (window.currentView === 'group-chat' && window.selectedAgents.length > 0) {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'group-chat',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement(GroupChat, {
                 agents: window.selectedAgents,
                 onBack: () => window.setView('agents'),
@@ -828,12 +813,6 @@ const App = () => {
     // Отображение основной панели мониторинга
     if (window.currentView === 'dashboard') {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'dashboard',
-                onNavigate: (page) => window.setView(page)
-            }),
-            
             React.createElement('div', { className: 'stats-bar' }, statItems),
 
             React.createElement('div', { className: 'dashboard' },
@@ -873,12 +852,6 @@ const App = () => {
     
     // Отображение основной панели мониторинга по умолчанию
     return React.createElement('div', { className: 'container' },
-        React.createElement(Header),
-        React.createElement(Navigation, {
-            currentPage: 'dashboard',
-            onNavigate: (page) => window.setView(page)
-        }),
-        
         React.createElement('div', { className: 'stats-bar' }, statItems),
 
         React.createElement('div', { className: 'dashboard' },

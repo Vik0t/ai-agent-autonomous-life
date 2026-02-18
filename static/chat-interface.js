@@ -10,9 +10,16 @@ const ChatInterface = ({ agent, onBack, onSendMessage }) => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
 
-    React.useEffect(() => {
+    // Scroll to bottom only when new messages are added
+    const messagesContainer = messagesEndRef.current?.parentElement;
+    if (messagesContainer) {
+        const isNearBottom = messagesContainer.scrollTop + messagesContainer.clientHeight >= messagesContainer.scrollHeight - 100;
+        if (isNearBottom || messagesContainer.scrollHeight <= messagesContainer.clientHeight) {
+            scrollToBottom();
+        }
+    } else {
         scrollToBottom();
-    }, [messages]);
+    }
 
     // Load chat history
     React.useEffect(() => {
@@ -68,6 +75,11 @@ const ChatInterface = ({ agent, onBack, onSendMessage }) => {
             setMessages(prev => [...prev, message]);
             setNewMessage('');
             
+            // Scroll to bottom after sending message
+            setTimeout(() => {
+                scrollToBottom();
+            }, 100);
+            
             // Send message to backend
             window.websocketClient.sendMessage({
                 type: 'send_message',
@@ -101,20 +113,6 @@ const ChatInterface = ({ agent, onBack, onSendMessage }) => {
     }
 
     return React.createElement('div', { className: 'container chat-container' },
-        // Chat header
-        React.createElement('div', { className: 'chat-header' },
-            React.createElement('button', {
-                className: 'cyber-btn secondary back-button',
-                onClick: onBack
-            }, '← Назад'),
-            React.createElement('div', { className: 'chat-agent-info' },
-                React.createElement('div', { className: 'chat-agent-avatar' }, agent.avatar),
-                React.createElement('div', { className: 'chat-agent-details' },
-                    React.createElement('h2', null, agent.name),
-                    React.createElement('p', null, agent.current_plan || 'Активен')
-                )
-            )
-        ),
         
         // Messages container
         React.createElement('div', { className: 'messages-container' },
@@ -169,50 +167,6 @@ const addChatInterfaceStyles = () => {
             max-width: 800px;
             margin: 0 auto;
             padding: 20px;
-        }
-        
-        .chat-header {
-            display: flex;
-            align-items: center;
-            gap: 20px;
-            margin-bottom: 30px;
-            padding: 20px;
-            background: rgba(0, 0, 0, 0.3);
-            border-radius: 12px;
-            border: 1px solid rgba(0, 240, 255, 0.1);
-        }
-        
-        .back-button {
-            margin-right: 10px;
-        }
-        
-        .chat-agent-info {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-        
-        .chat-agent-avatar {
-            width: 60px;
-            height: 60px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 2rem;
-            background: linear-gradient(135deg, var(--neon-cyan), var(--neon-purple));
-            box-shadow: 0 0 20px rgba(0, 240, 255, 0.3);
-        }
-        
-        .chat-agent-details h2 {
-            margin: 0 0 5px 0;
-            font-size: 1.5rem;
-        }
-        
-        .chat-agent-details p {
-            margin: 0;
-            color: rgba(255, 255, 255, 0.7);
-            font-size: 0.9rem;
         }
         
         .messages-container {
@@ -305,10 +259,6 @@ const addChatInterfaceStyles = () => {
         }
         
         @media (max-width: 768px) {
-            .chat-header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
             
             .message {
                 max-width: 90%;

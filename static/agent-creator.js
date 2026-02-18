@@ -14,6 +14,34 @@ const AgentCreator = ({ onBack, onCreateAgent }) => {
 
     const avatars = ['🤖', '👾', '🦾', '👽', '🚀', '🌟', '⚡', '🔮', '🧠', '💻', '📱', '🎮'];
 
+    // Add tooltip positioning logic
+    React.useEffect(() => {
+        const handleTooltipPosition = (e) => {
+            const tooltip = e.target.querySelector('.tooltip-content');
+            if (tooltip) {
+                const rect = tooltip.getBoundingClientRect();
+                const viewportWidth = window.innerWidth;
+                const viewportHeight = window.innerHeight;
+                
+                // Adjust position if tooltip goes off screen
+                if (rect.right > viewportWidth) {
+                    tooltip.style.left = (viewportWidth - rect.width - 10) + 'px';
+                }
+                if (rect.left < 0) {
+                    tooltip.style.left = '10px';
+                }
+                if (rect.top < 0) {
+                    tooltip.style.top = '10px';
+                }
+            }
+        };
+
+        document.addEventListener('mouseover', handleTooltipPosition, true);
+        return () => {
+            document.removeEventListener('mouseover', handleTooltipPosition, true);
+        };
+    }, []);
+
     const handlePersonalityChange = (trait, value) => {
         setPersonality(prev => ({
             ...prev,
@@ -158,9 +186,57 @@ const AgentCreator = ({ onBack, onCreateAgent }) => {
                             React.createElement('div', { className: 'trait-header' },
                                 React.createElement('label', { className: 'control-label' }, traitDescriptions[trait]),
                                 React.createElement('span', { className: 'trait-value' }, (value * 100).toFixed(0) + '%'),
-                                React.createElement('div', { 
-                                    className: 'tooltip-icon', 
-                                    'data-tooltip': traitTooltips[trait] 
+                                React.createElement('div', {
+                                    className: 'tooltip-icon',
+                                    'data-tooltip': traitTooltips[trait],
+                                    onMouseEnter: (e) => {
+                                        const tooltip = document.createElement('div');
+                                        tooltip.className = 'dynamic-tooltip';
+                                        tooltip.textContent = traitTooltips[trait];
+                                        tooltip.style.position = 'fixed';
+                                        tooltip.style.background = 'rgba(0, 0, 0, 0.95)';
+                                        tooltip.style.color = 'white';
+                                        tooltip.style.padding = '12px';
+                                        tooltip.style.borderRadius = '6px';
+                                        tooltip.style.fontSize = '0.85rem';
+                                        tooltip.style.width = '250px';
+                                        tooltip.style.whiteSpace = 'normal';
+                                        tooltip.style.zIndex = '1000';
+                                        tooltip.style.boxShadow = '0 4px 20px rgba(0, 0, 0, 0.5)';
+                                        tooltip.style.border = '1px solid rgba(0, 240, 255, 0.3)';
+                                        tooltip.style.pointerEvents = 'none';
+                                        tooltip.style.textAlign = 'left';
+                                        tooltip.style.lineHeight = '1.4';
+                                        
+                                        const rect = e.target.getBoundingClientRect();
+                                        tooltip.style.left = (rect.left + rect.width / 2 - 125) + 'px';
+                                        tooltip.style.top = (rect.top - 10) + 'px';
+                                        tooltip.style.transform = 'translateY(-100%)';
+                                        
+                                        // Ensure tooltip stays within viewport
+                                        setTimeout(() => {
+                                            const tooltipRect = tooltip.getBoundingClientRect();
+                                            if (tooltipRect.left < 10) {
+                                                tooltip.style.left = '10px';
+                                            }
+                                            if (tooltipRect.right > window.innerWidth - 10) {
+                                                tooltip.style.left = (window.innerWidth - tooltipRect.width - 10) + 'px';
+                                            }
+                                            if (tooltipRect.top < 10) {
+                                                tooltip.style.top = (rect.bottom + 10) + 'px';
+                                                tooltip.style.transform = 'none';
+                                            }
+                                        }, 0);
+                                        
+                                        document.body.appendChild(tooltip);
+                                        e.target.tooltipElement = tooltip;
+                                    },
+                                    onMouseLeave: (e) => {
+                                        if (e.target.tooltipElement) {
+                                            document.body.removeChild(e.target.tooltipElement);
+                                            e.target.tooltipElement = null;
+                                        }
+                                    }
                                 }, '?')
                             ),
                             React.createElement('input', {
@@ -257,21 +333,6 @@ const addAgentCreatorStyles = () => {
             position: relative;
         }
         
-        .tooltip-icon:hover::after {
-            content: attr(data-tooltip);
-            position: absolute;
-            bottom: 100%;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0, 0, 0, 0.9);
-            color: white;
-            padding: 8px;
-            border-radius: 4px;
-            font-size: 0.8rem;
-            width: 200px;
-            white-space: normal;
-            z-index: 100;
-        }
         
         .trait-slider {
             width: 100%;
