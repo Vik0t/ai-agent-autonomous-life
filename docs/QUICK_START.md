@@ -26,7 +26,7 @@ source venv/bin/activate       # macOS / Linux
 # venv\Scripts\activate        # Windows
 
 # Устанавливаем пакеты
-pip install fastapi "uvicorn[standard]" pydantic openai python-dotenv
+pip install -r requirements.txt
 ```
 
 ---
@@ -47,6 +47,9 @@ GROQ_API_KEY=gsk_ваш_ключ_здесь
 ## Шаг 4 — Запустить сервер
 
 ```bash
+cd backend
+python main.py 
+ИЛИ
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
@@ -66,11 +69,11 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 
 Перейдите в браузере на [http://localhost:8000](http://localhost:8000).
 
-Вы увидите дашборд с двумя агентами — **Алекса** (экстраверт) и **Нексус** (интроверт). Они уже общаются друг с другом автономно.
+Вы увидите дашборд с двумя агентами — **Алекса** (экстраверт) и **Нексус** (интроверт).
 
 ### Первый разговор с агентом
 
-В разделе **Chat** выберите агента и напишите сообщение. Агент ответит в течение 5–10 секунд (один игровой тик).
+В разделе **Chat** выберите агента и напишите сообщение.
 
 ### Добавить мировое событие
 
