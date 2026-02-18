@@ -8,3 +8,5 @@ python-dotenv
 websockets
 openai 
 python-dotenv
+sqlite3
+chromadb
