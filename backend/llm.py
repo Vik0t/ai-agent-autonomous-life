@@ -2,7 +2,7 @@ import os
 import json
 from typing import Dict, List, Any, Optional
 from dotenv import load_dotenv
-from openai import OpenAI
+from groq import Groq
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -10,27 +10,16 @@ load_dotenv()
 
 class LLMInterface:
     def __init__(self):
-        # Используем OPENROUTER_API_KEY из вашего .env
-        self.api_key = os.getenv("OPENROUTER_API_KEY")
-        
-        if not self.api_key:
-            self.api_key = os.getenv("OPENROUTER_API_KEY")
+        self.api_key = os.getenv("GROQ_API_KEY")
 
         if not self.api_key:
-            print("⚠️ WARNING: No API Key found in .env (expected OPENROUTER_API_KEY)")
+            print("⚠️ WARNING: No API Key found in .env (expected GROQ_API_KEY)")
             self.client = None
         else:
-            self.client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=self.api_key,
-                default_headers={
-                    "HTTP-Referer": "http://localhost:8000",
-                    "X-Title": "Cyber Hackathon Simulator",
-                }
-            )
+            self.client = Groq(api_key=self.api_key)
 
-        # Модель по умолчанию — быстрая и бесплатная
-        self._model = "qwen/qwen3-next-80b-a3b-instruct:free"
+        # Модель по умолчанию — быстрая модель Groq
+        self._model = "llama-3.3-70b-versatile"
 
     # ──────────────────────────────────────────────────────────────────
     # Утилиты форматирования
@@ -70,7 +59,6 @@ class LLMInterface:
         if not text:
             return None
         clean = text.replace("```json", "").replace("```", "").strip()
-        # Иногда модель добавляет текст до/после JSON — пробуем найти блок
         start = clean.find('[')
         if start == -1:
             start = clean.find('{')
@@ -82,7 +70,7 @@ class LLMInterface:
             return None
 
     # ──────────────────────────────────────────────────────────────────
-    # НОВЫЙ МЕТОД 1: Генерация динамических желаний через LLM
+    # МЕТОД 1: Генерация динамических желаний через LLM
     # ──────────────────────────────────────────────────────────────────
 
     def generate_dynamic_desires(
@@ -94,18 +82,6 @@ class LLMInterface:
         social_battery: float,
         perceptions: List[Dict]
     ) -> List[Dict]:
-        """
-        Генерирует список желаний агента на основе его состояния и окружения.
-
-        Если social_battery < 0.2 — LLM отдаёт приоритет SAFETY/CURIOSITY,
-        игнорируя SOCIAL мотивы.
-
-        Returns:
-            Список dict с ключами: description, priority, urgency,
-            motivation_type (SOCIAL/SAFETY/CURIOSITY/ACHIEVEMENT/ESTEEM),
-            source, context (dict).
-            При сбое LLM → пустой список (fallback обработает desires.py).
-        """
         battery_note = ""
         if social_battery < 0.2:
             battery_note = (
@@ -121,11 +97,10 @@ class LLMInterface:
                 "Снизь приоритет социальных желаний — агент немного устал."
             )
 
-        # Краткое описание восприятий
         perceptions_text = ""
         if perceptions:
             lines = []
-            for p in perceptions[:4]:  # максимум 4 восприятия
+            for p in perceptions[:4]:
                 ptype = p.get('type', '?')
                 subject = p.get('subject', '?')
                 data = p.get('data', {})
@@ -167,7 +142,6 @@ class LLMInterface:
         result = self._safe_parse_json(raw)
 
         if isinstance(result, list):
-            # Фильтруем схему — только нужные ключи
             clean = []
             for item in result:
                 if isinstance(item, dict) and 'description' in item:
@@ -187,7 +161,7 @@ class LLMInterface:
         return []
 
     # ──────────────────────────────────────────────────────────────────
-    # НОВЫЙ МЕТОД 2: Анализ хода диалога — CONTINUE / WRAP_UP / FORCE_QUIT
+    # МЕТОД 2: Анализ хода диалога
     # ──────────────────────────────────────────────────────────────────
 
     def analyze_conversation_turn(
@@ -198,14 +172,6 @@ class LLMInterface:
         conversation_history: List[Dict],
         social_battery: float
     ) -> str:
-        """
-        Анализирует текущий диалог и возвращает одно из трёх решений:
-          CONTINUE   — продолжить разговор
-          WRAP_UP    — начать прощаться (целевое поведение при усталости)
-          FORCE_QUIT — резко прервать (батарейка на нуле или агент обиделся)
-
-        Fallback при ошибке LLM → CONTINUE.
-        """
         if social_battery <= 0.0:
             print(f"⚡ [{agent_id}] Battery=0, FORCE_QUIT")
             return "FORCE_QUIT"
@@ -213,7 +179,6 @@ class LLMInterface:
         if social_battery < 0.1:
             return "WRAP_UP"
 
-        # Форматируем историю диалога
         history_lines = []
         for msg in (conversation_history or [])[-8:]:
             sender = msg.get('sender_name', msg.get('sender_id', '?'))
@@ -258,7 +223,7 @@ FORCE_QUIT — если нужно резко прервать (батарейк
         return "CONTINUE"
 
     # ──────────────────────────────────────────────────────────────────
-    # НОВЫЙ МЕТОД 3: Генерация следующего шага плана (динамический планировщик)
+    # МЕТОД 3: Генерация следующего шага плана
     # ──────────────────────────────────────────────────────────────────
 
     def generate_next_plan_step(
@@ -270,16 +235,6 @@ FORCE_QUIT — если нужно резко прервать (батарейк
         conversation_history: List[Dict],
         social_battery: float
     ) -> List[str]:
-        """
-        Генерирует 1–2 следующих логических шага для плана диалога.
-        Возвращает список ActionType строк (нижний регистр).
-
-        Допустимые значения:
-          send_message, wait_for_response, end_conversation,
-          initiate_conversation, respond_to_message, think
-
-        Fallback при ошибке → ["think"]
-        """
         VALID_ACTIONS = {
             "send_message", "wait_for_response", "end_conversation",
             "initiate_conversation", "respond_to_message", "think"
@@ -327,7 +282,7 @@ FORCE_QUIT — если нужно резко прервать (батарейк
         return ["think"]
 
     # ──────────────────────────────────────────────────────────────────
-    # Существующие методы (без изменений)
+    # Существующие методы
     # ──────────────────────────────────────────────────────────────────
 
     def generate_response(self, prompt: str, system_message: str = "") -> str:
@@ -410,7 +365,7 @@ Your response (in character, {agent_name}):"""
         try:
             print(f"User prompt for {agent_name} ({message_type}):\n{user_prompt}")
             response = self.client.chat.completions.create(
-                model="openrouter/aurora-alpha",
+                model=self._model,  # ← используем self._model вместо захардкоженной строки
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_prompt}
