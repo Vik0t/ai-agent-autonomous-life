@@ -3,6 +3,7 @@ const Navigation = ({ currentPage, onNavigate }) => {
     const navItems = [
         { id: 'dashboard', label: 'Дашборд', icon: '📊' },
         { id: 'agents', label: 'Агенты', icon: '🤖' },
+        { id: 'create-agent', label: 'Создать Агента', icon: '🔧' },
         { id: 'chat', label: 'Чаты', icon: '💬' },
         { id: 'analytics', label: 'Аналитика', icon: '📈' }
     ];

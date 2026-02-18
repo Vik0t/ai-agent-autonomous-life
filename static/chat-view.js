@@ -5,57 +5,101 @@ const ChatView = ({ onBack }) => {
     
     // Load all messages from window.messages
     React.useEffect(() => {
-        // Simulate loading
-        setTimeout(() => {
-            // Collect all messages from all agents
-            const allMessages = [];
-            
-            // Get messages from window.messages if available
-            if (window.messages) {
-                Object.entries(window.messages).forEach(([agentId, agentMessages]) => {
-                    agentMessages.forEach(msg => {
-                        // Find agent name
-                        const agent = window.agentsData?.find(a => a.id == agentId);
-                        allMessages.push({
-                            ...msg,
-                            agentName: agent ? agent.name : `Агент ${agentId}`,
-                            agentAvatar: agent ? agent.avatar : '🤖'
-                        });
+        // Load messages immediately
+        loadMessages();
+        
+        // Set up listener for new messages
+        const handleNewMessage = (message) => {
+            setMessages(prev => {
+                // Convert backend message to frontend format
+                const agent = window.agentsData?.find(a => a.id == message.sender_id);
+                const newMessage = {
+                    id: message.id || Date.now() + Math.random(),
+                    sender_id: message.sender_id,
+                    sender_name: agent ? agent.name : `Agent ${message.sender_id}`,
+                    content: message.content,
+                    timestamp: new Date().toLocaleTimeString(),
+                    is_system: false,
+                    agentAvatar: agent ? agent.avatar : '🤖'
+                };
+                
+                // Check if message already exists
+                const exists = prev.some(m => m.id === newMessage.id);
+                if (!exists) {
+                    return [...prev, newMessage].sort((a, b) => {
+                        return a.timestamp.localeCompare(b.timestamp);
+                    });
+                }
+                return prev;
+            });
+        };
+        
+        const handleWorldState = (worldState) => {
+            if (worldState.recent_messages) {
+                loadMessages();
+            }
+        };
+        
+        window.websocketClient.on('agent_message', handleNewMessage);
+        window.websocketClient.on('world_state', handleWorldState);
+        
+        // Clean up listeners
+        return () => {
+            window.websocketClient.off('agent_message', handleNewMessage);
+            window.websocketClient.off('world_state', handleWorldState);
+        };
+    }, []);
+    
+    const loadMessages = () => {
+        setIsLoading(true);
+        // Collect all messages from all agents
+        const allMessages = [];
+        
+        // Get messages from window.messages if available
+        if (window.messages) {
+            Object.entries(window.messages).forEach(([agentId, agentMessages]) => {
+                agentMessages.forEach(msg => {
+                    // Find agent name
+                    const agent = window.agentsData?.find(a => a.id == agentId);
+                    allMessages.push({
+                        ...msg,
+                        agentName: agent ? agent.name : `Агент ${agentId}`,
+                        agentAvatar: agent ? agent.avatar : '🤖'
                     });
                 });
-            }
-            
-            // Add some mock system messages
-            const systemMessages = [
-                {
-                    id: 'sys1',
-                    sender_id: 'system',
-                    sender_name: 'Система',
-                    content: 'Система инициализирована. 3 агента активированы.',
-                    timestamp: '09:00',
-                    is_system: true
-                },
-                {
-                    id: 'sys2',
-                    sender_id: 'system',
-                    sender_name: 'Система',
-                    content: 'Начало симуляции взаимодействий агентов',
-                    timestamp: '09:05',
-                    is_system: true
-                }
-            ];
-            
-            // Combine and sort by timestamp
-            const combinedMessages = [...systemMessages, ...allMessages];
-            combinedMessages.sort((a, b) => {
-                // Simple sorting by timestamp string
-                return a.timestamp.localeCompare(b.timestamp);
             });
-            
-            setMessages(combinedMessages);
-            setIsLoading(false);
-        }, 500);
-    }, []);
+        }
+        
+        // Add some mock system messages
+        const systemMessages = [
+            {
+                id: 'sys1',
+                sender_id: 'system',
+                sender_name: 'Система',
+                content: 'Система инициализирована. Агенты активированы.',
+                timestamp: '09:00',
+                is_system: true
+            },
+            {
+                id: 'sys2',
+                sender_id: 'system',
+                sender_name: 'Система',
+                content: 'Начало симуляции взаимодействий агентов',
+                timestamp: '09:05',
+                is_system: true
+            }
+        ];
+        
+        // Combine and sort by timestamp
+        const combinedMessages = [...systemMessages, ...allMessages];
+        combinedMessages.sort((a, b) => {
+            // Simple sorting by timestamp string
+            return a.timestamp.localeCompare(b.timestamp);
+        });
+        
+        setMessages(combinedMessages);
+        setIsLoading(false);
+    };
     
     return React.createElement('div', { className: 'container chat-view-container' },
         // Header

@@ -52,6 +52,11 @@ class Intention:
     # Метрики
     actual_duration: float = 0.0
     retry_count: int = 0
+
+    # Прерываемость: рутинные действия (think/move/observe) можно приостановить
+    # если пришло срочное социальное событие (incoming_message).
+    # Социальные намерения (respond, initiate) — НЕ прерываемы.
+    interruptible: bool = True
     
     def update_progress(self, step_result: Dict[str, Any]) -> None:
         """
@@ -148,7 +153,8 @@ class Intention:
             'context': self.context,
             'execution_log': self.execution_log,
             'actual_duration': self.actual_duration,
-            'retry_count': self.retry_count
+            'retry_count': self.retry_count,
+            'interruptible': self.interruptible
         }
     
     @classmethod
@@ -172,7 +178,8 @@ class Intention:
             context=data.get('context', {}),
             execution_log=data.get('execution_log', []),
             actual_duration=data.get('actual_duration', 0.0),
-            retry_count=data.get('retry_count', 0)
+            retry_count=data.get('retry_count', 0),
+            interruptible=data.get('interruptible', True)
         )
     
     def __repr__(self):
@@ -276,6 +283,28 @@ class IntentionSelector:
     def _select_by_urgency(self, desires: List) -> Any:
         """Выбрать самое срочное желание"""
         return max(desires, key=lambda d: d.urgency)
+
+    def interrupt_for_social(
+        self,
+        intentions: List[Intention],
+        urgent_desire
+    ) -> List[Intention]:
+        """
+        Реактивное прерывание: если пришло срочное социальное желание
+        (источник incoming_message), приостановить все прерываемые намерения.
+
+        Возвращает список приостановленных намерений (для логирования).
+        """
+        from .desires import MotivationType
+        suspended = []
+        for intention in intentions:
+            if (intention.status == IntentionStatus.ACTIVE
+                    and intention.interruptible):
+                intention.suspend(
+                    reason=f"Прерван срочным: {urgent_desire.description[:40]}"
+                )
+                suspended.append(intention)
+        return suspended
     
     def should_reconsider_intentions(
         self,
@@ -346,14 +375,48 @@ class IntentionSelector:
 # Utility функции
 
 def create_intention_from_desire(desire, plan) -> Intention:
-    """Создать намерение из желания и плана"""
+    """Создать намерение из желания и плана.
+
+    Правило прерываемости (interruptible):
+      - Рутинные (think, move, observe, idle_drive, llm_fallback) → прерываемые
+      - Любое социальное намерение (ответ, инициация, user) → НЕ прерываемые
+    """
+    SOCIAL_SOURCES = {
+        'incoming_message', 'user_message', 'wrap_up', 'deep_work_reject',
+        'personality_extraversion', 'personality_agreeableness',
+        'emotion_happiness', 'emotion_sadness',
+    }
+    source = getattr(desire, 'source', '')
+    mtype = getattr(desire, 'motivation_type', None)
+
+    # Любое SOCIAL / world_event / user желание — не прерываем
+    try:
+        from .desires import MotivationType
+    except ImportError:
+        try:
+            from desires import MotivationType
+        except ImportError:
+            MotivationType = None
+
+    is_social_source = source in SOCIAL_SOURCES
+    is_social_type = (
+        MotivationType is not None
+        and mtype in (MotivationType.SOCIAL, MotivationType.WORLD_EVENT)
+    )
+    # LLM-желание поговорить с конкретным target_agent → не прерываем
+    has_target = bool((getattr(desire, 'context', {}) or {}).get('target_agent'))
+    is_llm_social = (source == 'llm_dynamic' and is_social_type and has_target)
+
+    interruptible = not (is_social_source or is_social_type or is_llm_social)
+
     return Intention(
         desire_id=desire.id,
         desire_description=desire.description,
         plan=plan,
         priority=desire.priority,
         status=IntentionStatus.ACTIVE,
-        context=desire.context.copy() if hasattr(desire, 'context') else {}
+        context=desire.context.copy() if hasattr(desire, 'context') else {},
+        interruptible=interruptible
     )
 
 

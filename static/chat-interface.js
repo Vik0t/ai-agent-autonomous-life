@@ -10,53 +10,53 @@ const ChatInterface = ({ agent, onBack, onSendMessage }) => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     };
 
-    React.useEffect(() => {
+    // Scroll to bottom only when new messages are added
+    const messagesContainer = messagesEndRef.current?.parentElement;
+    if (messagesContainer) {
+        const isNearBottom = messagesContainer.scrollTop + messagesContainer.clientHeight >= messagesContainer.scrollHeight - 100;
+        if (isNearBottom || messagesContainer.scrollHeight <= messagesContainer.clientHeight) {
+            scrollToBottom();
+        }
+    } else {
         scrollToBottom();
-    }, [messages]);
+    }
 
-    // Simulate loading chat history
+    // Load chat history
     React.useEffect(() => {
         if (agent) {
             setIsLoading(true);
-            // Simulate API call to fetch chat history
-            setTimeout(() => {
-                const mockMessages = [
-                    {
-                        id: '1',
-                        sender_id: 'user',
-                        receiver_id: agent.id,
-                        content: 'Привет! Как дела?',
-                        timestamp: '10:30',
-                        is_user: true
-                    },
-                    {
-                        id: '2',
-                        sender_id: agent.id,
-                        receiver_id: 'user',
-                        content: `Привет! У меня всё хорошо, спасибо за спрос. Я ${agent.name}, и я рад общаться с тобой!`,
-                        timestamp: '10:32',
-                        is_user: false
-                    },
-                    {
-                        id: '3',
-                        sender_id: 'user',
-                        receiver_id: agent.id,
-                        content: 'Отлично! Мы работаем над новыми функциями для симуляции.',
-                        timestamp: '10:35',
-                        is_user: true
-                    },
-                    {
-                        id: '4',
-                        sender_id: agent.id,
-                        receiver_id: 'user',
-                        content: 'Это звучит интересно! Расскажи подробнее о проекте.',
-                        timestamp: '10:37',
-                        is_user: false
-                    }
-                ];
-                setMessages(mockMessages);
-                setIsLoading(false);
-            }, 500);
+            // Load messages from global state
+            const agentMessages = window.messages[agent.id] || [];
+            setMessages(agentMessages);
+            setIsLoading(false);
+            
+            // Set up listener for new messages
+            const handleMessage = (message) => {
+                if (message.sender_id === agent.id) {
+                    setMessages(prev => {
+                        // Check if message already exists
+                        const exists = prev.some(m => m.id === message.id);
+                        if (!exists) {
+                            return [...prev, {
+                                id: message.id,
+                                sender_id: message.sender_id,
+                                receiver_id: 'user',
+                                content: message.content,
+                                timestamp: new Date().toLocaleTimeString(),
+                                is_user: false
+                            }];
+                        }
+                        return prev;
+                    });
+                }
+            };
+            
+            window.websocketClient.on('agent_message', handleMessage);
+            
+            // Clean up listener
+            return () => {
+                window.websocketClient.off('agent_message', handleMessage);
+            };
         }
     }, [agent]);
 
@@ -75,29 +75,24 @@ const ChatInterface = ({ agent, onBack, onSendMessage }) => {
             setMessages(prev => [...prev, message]);
             setNewMessage('');
             
-            // Simulate agent response
+            // Scroll to bottom after sending message
             setTimeout(() => {
-                const responses = [
-                    "Интересная мысль! Давай обсудим подробнее.",
-                    "Я согласен с твоей точкой зрения.",
-                    "Не уверен, что это правильный подход.",
-                    "Это напоминает мне прошлое событие...",
-                    "Давайте работать вместе над этим!",
-                    "Мне нужно время обдумать это.",
-                    "Звучит интригующе! Расскажи больше."
-                ];
-                
-                const response = {
-                    id: (Date.now() + 1).toString(),
-                    sender_id: agent.id,
-                    receiver_id: 'user',
-                    content: responses[Math.floor(Math.random() * responses.length)],
-                    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                    is_user: false
-                };
-                
-                setMessages(prev => [...prev, response]);
-            }, 1000 + Math.random() * 2000);
+                scrollToBottom();
+            }, 100);
+            
+            // Send message to backend
+            window.websocketClient.sendMessage({
+                type: 'send_message',
+                sender_id: 'user',
+                receiver_id: agent.id,
+                content: newMessage
+            });
+            
+            // Add to global messages
+            if (!window.messages[agent.id]) {
+                window.messages[agent.id] = [];
+            }
+            window.messages[agent.id].push(message);
         }
     };
 
@@ -118,20 +113,6 @@ const ChatInterface = ({ agent, onBack, onSendMessage }) => {
     }
 
     return React.createElement('div', { className: 'container chat-container' },
-        // Chat header
-        React.createElement('div', { className: 'chat-header' },
-            React.createElement('button', {
-                className: 'cyber-btn secondary back-button',
-                onClick: onBack
-            }, '← Назад'),
-            React.createElement('div', { className: 'chat-agent-info' },
-                React.createElement('div', { className: 'chat-agent-avatar' }, agent.avatar),
-                React.createElement('div', { className: 'chat-agent-details' },
-                    React.createElement('h2', null, agent.name),
-                    React.createElement('p', null, agent.current_plan || 'Активен')
-                )
-            )
-        ),
         
         // Messages container
         React.createElement('div', { className: 'messages-container' },
@@ -186,50 +167,6 @@ const addChatInterfaceStyles = () => {
             max-width: 800px;
             margin: 0 auto;
             padding: 20px;
-        }
-        
-        .chat-header {
-            display: flex;
-            align-items: center;
-            gap: 20px;
-            margin-bottom: 30px;
-            padding: 20px;
-            background: rgba(0, 0, 0, 0.3);
-            border-radius: 12px;
-            border: 1px solid rgba(0, 240, 255, 0.1);
-        }
-        
-        .back-button {
-            margin-right: 10px;
-        }
-        
-        .chat-agent-info {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-        
-        .chat-agent-avatar {
-            width: 60px;
-            height: 60px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 2rem;
-            background: linear-gradient(135deg, var(--neon-cyan), var(--neon-purple));
-            box-shadow: 0 0 20px rgba(0, 240, 255, 0.3);
-        }
-        
-        .chat-agent-details h2 {
-            margin: 0 0 5px 0;
-            font-size: 1.5rem;
-        }
-        
-        .chat-agent-details p {
-            margin: 0;
-            color: rgba(255, 255, 255, 0.7);
-            font-size: 0.9rem;
         }
         
         .messages-container {
@@ -322,10 +259,6 @@ const addChatInterfaceStyles = () => {
         }
         
         @media (max-width: 768px) {
-            .chat-header {
-                flex-direction: column;
-                align-items: flex-start;
-            }
             
             .message {
                 max-width: 90%;

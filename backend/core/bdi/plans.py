@@ -1,9 +1,15 @@
 """
-Planning System - Система планирования
+plans.py  [v5 — Динамический планировщик]
 
-Plan (план) - последовательность действий для достижения цели
-PlanStep (шаг плана) - одно конкретное действие
-Planner (планировщик) - создаёт планы для достижения целей
+Ключевые изменения v5:
+1. УДАЛЕНЫ: _create_initiator_plan, _create_respond_plan — жёсткие массивы шагов.
+2. ДОБАВЛЕН: create_dynamic_plan — универсальный метод для диалоговых планов.
+   - Максимум 2 шага: [Action, WAIT_FOR_RESPONSE] или [Action, END_CONVERSATION].
+   - Использует llm.generate_next_plan_step для определения следующего шага.
+   - При сбое LLM → fallback на минимальный plan.
+3. СОХРАНЕНЫ: все не-диалоговые планы (movement, search, learning, idle, solo).
+4. extend_conversation_plan — метод для «достройки» плана из deliberation_cycle
+   после получения нового сообщения.
 """
 
 from typing import Dict, List, Any, Optional
@@ -14,515 +20,752 @@ import uuid
 
 
 class ActionType(Enum):
-    """Типы действий, которые может выполнять агент"""
-    MOVE = "move"                   # Переместиться в другую локацию
-    COMMUNICATE = "communicate"     # Общаться с другим агентом
-    WAIT = "wait"                   # Подождать
-    SEARCH = "search"               # Искать что-то
-    ACQUIRE = "acquire"             # Получить ресурс/предмет
-    USE = "use"                     # Использовать предмет
-    OBSERVE = "observe"             # Наблюдать/изучать
-    THINK = "think"                 # Размышлять/анализировать
-    EXPRESS = "express"             # Выразить эмоцию
-    HELP = "help"                   # Помочь кому-то
-    REQUEST = "request"             # Запросить что-то
-    GIVE = "give"                   # Отдать что-то
+    MOVE = "move"
+    COMMUNICATE = "communicate"
+    WAIT = "wait"
+    SEARCH = "search"
+    ACQUIRE = "acquire"
+    USE = "use"
+    OBSERVE = "observe"
+    THINK = "think"
+    EXPRESS = "express"
+    HELP = "help"
+    REQUEST = "request"
+    GIVE = "give"
+    INITIATE_CONVERSATION = "initiate_conversation"
+    SEND_MESSAGE = "send_message"
+    WAIT_FOR_RESPONSE = "wait_for_response"
+    RESPOND_TO_MESSAGE = "respond_to_message"
+    END_CONVERSATION = "end_conversation"
+
+
+# Маппинг строк из LLM → ActionType
+_ACTION_STRING_MAP = {
+    "send_message": ActionType.SEND_MESSAGE,
+    "wait_for_response": ActionType.WAIT_FOR_RESPONSE,
+    "end_conversation": ActionType.END_CONVERSATION,
+    "initiate_conversation": ActionType.INITIATE_CONVERSATION,
+    "respond_to_message": ActionType.RESPOND_TO_MESSAGE,
+    "think": ActionType.THINK,
+}
 
 
 @dataclass
 class PlanStep:
-    """
-    Один шаг в плане - конкретное действие
-    
-    Примеры:
-        PlanStep(action_type=MOVE, parameters={"destination": "cafe"})
-        PlanStep(action_type=COMMUNICATE, parameters={"target": "agent_2", "message": "Hello"})
-    """
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     action_type: ActionType = ActionType.WAIT
     parameters: Dict[str, Any] = field(default_factory=dict)
     description: str = ""
-    estimated_duration: float = 1.0  # В тактах симуляции
-    
-    # Результаты выполнения (заполняется после)
+    estimated_duration: float = 1.0
     executed: bool = False
     success: bool = False
     actual_duration: float = 0.0
     result: Dict[str, Any] = field(default_factory=dict)
-    
+    timed_out: bool = False
+
     def __repr__(self):
-        status = "✓" if self.executed else "○"
-        return f"{status} Step({self.action_type.value}: {self.description})"
-    
+        status = "⏱" if self.timed_out else ("✓" if self.executed else "○")
+        return f"{status} {self.action_type.value}: {self.description}"
+
     def to_dict(self) -> Dict[str, Any]:
-        """Сериализация в словарь"""
         return {
-            'id': self.id,
-            'action_type': self.action_type.value,
-            'parameters': self.parameters,
-            'description': self.description,
+            'id': self.id, 'action_type': self.action_type.value,
+            'parameters': self.parameters, 'description': self.description,
             'estimated_duration': self.estimated_duration,
-            'executed': self.executed,
-            'success': self.success,
-            'actual_duration': self.actual_duration,
-            'result': self.result
+            'executed': self.executed, 'success': self.success,
+            'actual_duration': self.actual_duration, 'result': self.result,
+            'timed_out': self.timed_out
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'PlanStep':
-        """Десериализация из словаря"""
         return cls(
             id=data.get('id', str(uuid.uuid4())),
             action_type=ActionType(data['action_type']),
             parameters=data.get('parameters', {}),
             description=data.get('description', ''),
             estimated_duration=data.get('estimated_duration', 1.0),
-            executed=data.get('executed', False),
-            success=data.get('success', False),
-            actual_duration=data.get('actual_duration', 0.0),
-            result=data.get('result', {})
+            executed=data.get('executed', False), success=data.get('success', False),
+            actual_duration=data.get('actual_duration', 0.0), result=data.get('result', {}),
+            timed_out=data.get('timed_out', False)
         )
 
 
 @dataclass
 class Plan:
-    """
-    План действий для достижения цели
-    
-    Содержит последовательность шагов и метаинформацию.
-    """
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    goal: str = ""                          # Описание цели
+    goal: str = ""
     steps: List[PlanStep] = field(default_factory=list)
-    preconditions: List[str] = field(default_factory=list)  # Что нужно до начала
-    expected_outcome: str = ""              # Ожидаемый результат
-    
-    # Метаданные
+    preconditions: List[str] = field(default_factory=list)
+    expected_outcome: str = ""
     created_at: datetime = field(default_factory=datetime.now)
-    estimated_total_duration: float = 0.0   # Сумма длительностей шагов
-    
+    estimated_total_duration: float = 0.0
+
     def __post_init__(self):
-        """Вычисляем общую длительность"""
-        if self.steps:
-            self.estimated_total_duration = sum(step.estimated_duration for step in self.steps)
-    
-    def get_next_step(self, current_step_index: int) -> Optional[PlanStep]:
-        """Получить следующий невыполненный шаг"""
-        if current_step_index < len(self.steps):
-            return self.steps[current_step_index]
-        return None
-    
-    def is_complete(self, current_step_index: int) -> bool:
-        """Проверить, завершён ли план"""
-        return current_step_index >= len(self.steps)
-    
-    def get_progress(self, current_step_index: int) -> float:
-        """Получить прогресс выполнения (0.0 - 1.0)"""
-        if not self.steps:
-            return 0.0
-        return min(1.0, current_step_index / len(self.steps))
-    
+        self.estimated_total_duration = sum(s.estimated_duration for s in self.steps)
+
+    def get_next_step(self, idx: int) -> Optional[PlanStep]:
+        return self.steps[idx] if idx < len(self.steps) else None
+
+    def is_complete(self, idx: int) -> bool:
+        return idx >= len(self.steps)
+
+    def get_progress(self, idx: int) -> float:
+        return min(1.0, idx / len(self.steps)) if self.steps else 0.0
+
+    def skip_to_end_conversation(self, current_idx: int) -> int:
+        """При таймауте wait_for_response — пропустить до END_CONVERSATION."""
+        for i in range(current_idx, len(self.steps)):
+            if self.steps[i].action_type == ActionType.END_CONVERSATION:
+                for j in range(current_idx, i):
+                    self.steps[j].executed = True
+                    self.steps[j].success = False
+                    self.steps[j].timed_out = True
+                return i
+        for j in range(current_idx, len(self.steps)):
+            self.steps[j].executed = True
+            self.steps[j].success = False
+            self.steps[j].timed_out = True
+        return len(self.steps)
+
     def get_completed_steps(self) -> List[PlanStep]:
-        """Получить выполненные шаги"""
-        return [step for step in self.steps if step.executed]
-    
+        return [s for s in self.steps if s.executed]
+
     def get_remaining_steps(self) -> List[PlanStep]:
-        """Получить невыполненные шаги"""
-        return [step for step in self.steps if not step.executed]
-    
+        return [s for s in self.steps if not s.executed]
+
     def to_dict(self) -> Dict[str, Any]:
-        """Сериализация в словарь"""
         return {
-            'id': self.id,
-            'goal': self.goal,
-            'steps': [step.to_dict() for step in self.steps],
-            'preconditions': self.preconditions,
-            'expected_outcome': self.expected_outcome,
+            'id': self.id, 'goal': self.goal,
+            'steps': [s.to_dict() for s in self.steps],
+            'preconditions': self.preconditions, 'expected_outcome': self.expected_outcome,
             'created_at': self.created_at.isoformat(),
             'estimated_total_duration': self.estimated_total_duration
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Plan':
-        """Десериализация из словаря"""
         return cls(
-            id=data.get('id', str(uuid.uuid4())),
-            goal=data.get('goal', ''),
-            steps=[PlanStep.from_dict(step) for step in data.get('steps', [])],
+            id=data.get('id', str(uuid.uuid4())), goal=data.get('goal', ''),
+            steps=[PlanStep.from_dict(s) for s in data.get('steps', [])],
             preconditions=data.get('preconditions', []),
             expected_outcome=data.get('expected_outcome', ''),
             created_at=datetime.fromisoformat(data['created_at']) if 'created_at' in data else datetime.now()
         )
-    
+
     def __repr__(self):
         return f"Plan({self.goal}, {len(self.steps)} steps)"
 
 
 class Planner:
-    """
-    Планировщик - создаёт планы для достижения целей
-    
-    Использует шаблоны и эвристики для создания планов.
-    Может интегрироваться с LLM для более сложного планирования.
-    """
-    
     def __init__(self, llm_interface=None):
-        """
-        Args:
-            llm_interface: Опциональный LLM для генерации планов
-        """
         self.llm = llm_interface
-        self.plan_templates = self._initialize_templates()
-    
-    def _initialize_templates(self) -> Dict[str, Any]:
-        """Инициализация шаблонов планов"""
-        return {
-            'communicate': self._create_communication_plan,
-            'move': self._create_movement_plan,
-            'search': self._create_search_plan,
-            'learn': self._create_learning_plan,
-            'help': self._create_help_plan,
-            'acquire': self._create_acquisition_plan,
-        }
-    
-    def create_plan(
+
+    def create_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
+        desc = desire.description.lower()
+        source = getattr(desire, 'source', '')
+        mtype = getattr(desire, 'motivation_type', None)
+        ctx = getattr(desire, 'context', {}) or {}
+
+        # ── Диалоговые планы ─────────────────────────────────────────
+        # 1. Ответ на входящее сообщение (responder)
+        if source in ('incoming_message', 'user_message') or desc.startswith('ответить'):
+            return self.create_dynamic_plan(
+                desire=desire,
+                beliefs_base=beliefs_base,
+                agent_id=agent_id,
+                role='responder'
+            )
+
+        # 2. Deep Work busy-signal
+        if source == 'deep_work_reject':
+            target = ctx.get('target_agent', '')
+            busy_msg = ctx.get('busy_message',
+                               "Я сейчас глубоко сосредоточен, не могу отвлечься.")
+            return Plan(
+                goal=desire.description,
+                steps=[PlanStep(
+                    action_type=ActionType.SEND_MESSAGE,
+                    parameters={"target": target, "message_type": "statement",
+                                "content": busy_msg, "requires_response": False,
+                                "tone": "polite_busy"},
+                    description=f"Сообщить {target}: занят",
+                    estimated_duration=0.5
+                )],
+                expected_outcome="Партнёр уведомлён о занятости"
+            )
+
+        # 3. Реакция на мировое событие
+        if ctx.get('is_event_reaction') or source == 'world_event':
+            return self._create_event_reaction_plan(desire, beliefs_base, agent_id)
+
+        # 4. LLM / любое SOCIAL желание с target_agent — инициатор диалога
+        try:
+            from .desires import MotivationType as MT
+        except ImportError:
+            try:
+                from desires import MotivationType as MT
+            except ImportError:
+                MT = None
+        is_social_type = (MT is not None and mtype == MT.SOCIAL)
+        has_target = bool(ctx.get('target_agent'))
+        social_kw = ['поговорить', 'общаться', 'сказать', 'пообщаться',
+                     'поделиться', 'помочь', 'найти утешение',
+                     'встретиться', 'поболтать', 'навестить']
+
+        if (is_social_type and has_target) or any(w in desc for w in social_kw):
+            return self.create_dynamic_plan(
+                desire=desire,
+                beliefs_base=beliefs_base,
+                agent_id=agent_id,
+                role='initiator'
+            )
+
+        # ── Не-диалоговые планы ───────────────────────────────────────
+        # Idle Drive
+        if source == 'idle_drive' or ctx.get('is_idle'):
+            return self._create_idle_plan(desire, beliefs_base, agent_id)
+
+        if any(w in desc for w in ['пойти', 'переместиться', 'идти', 'прогуляться']):
+            return self._create_movement_plan(desire, beliefs_base, agent_id)
+        if any(w in desc for w in ['найти', 'искать', 'поиск']):
+            return self._create_search_plan(desire, beliefs_base, agent_id)
+        if any(w in desc for w in ['изучить', 'узнать', 'прочитать', 'исследовать']):
+            return self._create_learning_plan(desire, beliefs_base, agent_id)
+        if any(w in desc for w in ['тихое место', 'размышлени', 'побыть одному', 'уединени']):
+            return self._create_solo_plan(desire, beliefs_base, agent_id, mode='reflection')
+        if any(w in desc for w in ['организовать', 'упорядочить', 'дела']):
+            return self._create_solo_plan(desire, beliefs_base, agent_id, mode='organize')
+
+        return self._create_generic_plan(desire, beliefs_base, agent_id)
+
+    # ──────────────────────────────────────────────────────────────────
+    # НОВЫЙ МЕТОД: create_dynamic_plan
+    # Диалоговый план максимум из 2 шагов.
+    # Первый шаг — строится детерминированно (INITIATE + SEND_MESSAGE).
+    # Следующие шаги — либо из LLM, либо минимальный fallback.
+    # ──────────────────────────────────────────────────────────────────
+
+    def create_dynamic_plan(
         self,
         desire,
         beliefs_base,
-        agent_id: str
+        agent_id: str,
+        role: str = 'initiator',     # 'initiator' | 'responder'
+        conversation_history: List[Dict] = None,
+        social_battery: float = 1.0,
+        personality: Dict = None
     ) -> Plan:
         """
-        Создать план для достижения цели
-        
-        Args:
-            desire: Желание (объект Desire)
-            beliefs_base: База убеждений агента
-            agent_id: ID агента
-        
-        Returns:
-            План действий
+        Динамический диалоговый план.
+
+        Структура (максимум 2 шага за один вызов):
+          Инициатор:  INITIATE_CONVERSATION → SEND_MESSAGE(greeting) → WAIT_FOR_RESPONSE
+          Ответчик:   INITIATE_CONVERSATION → SEND_MESSAGE(answer)   → (WAIT или END)
+
+        После получения ответа deliberation_cycle вызывает extend_conversation_plan
+        чтобы добавить следующие 1–2 шага.
         """
-        description_lower = desire.description.lower()
-        
-        # Определяем тип плана по ключевым словам
-        if any(word in description_lower for word in ['поговорить', 'общаться', 'сказать', 'пообщаться']):
-            return self._create_communication_plan(desire, beliefs_base, agent_id)
-        
-        elif any(word in description_lower for word in ['пойти', 'переместиться', 'идти']):
-            return self._create_movement_plan(desire, beliefs_base, agent_id)
-        
-        elif any(word in description_lower for word in ['найти', 'искать', 'поиск']):
-            return self._create_search_plan(desire, beliefs_base, agent_id)
-        
-        elif any(word in description_lower for word in ['изучить', 'узнать', 'прочитать', 'исследовать']):
-            return self._create_learning_plan(desire, beliefs_base, agent_id)
-        
-        elif any(word in description_lower for word in ['помочь', 'помощь', 'поддержать']):
-            return self._create_help_plan(desire, beliefs_base, agent_id)
-        
-        elif any(word in description_lower for word in ['получить', 'взять', 'приобрести']):
-            return self._create_acquisition_plan(desire, beliefs_base, agent_id)
-        
-        else:
-            # Общий план
-            return self._create_generic_plan(desire, beliefs_base, agent_id)
-    
-    def _create_communication_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
-        """План для общения с кем-то"""
-        from .beliefs import BeliefType
-        
+        target = desire.context.get('target_agent', '')
+        if not target and beliefs_base is not None:
+            target = self._find_target_from_beliefs(beliefs_base, agent_id)
+
+        topic = desire.context.get('topic', 'общие темы')
+        msg_id = desire.context.get('in_reply_to_msg', '')
+        incoming = desire.context.get('incoming_content', '')
+
         steps = []
-        
-        # Извлечь target из описания или контекста
-        target = desire.context.get('target_agent')
-        
-        if not target:
-            # Пытаемся извлечь из описания
-            words = desire.description.split()
-            for word in words:
-                if word.startswith('agent_'):
-                    target = word
-                    break
-        
-        if not target:
-            target = "any_agent"
-        
-        # Проверить текущую локацию агента
-        my_location_belief = beliefs_base.get_belief(
-            BeliefType.SELF,
-            agent_id,
-            "location"
-        )
-        my_location = my_location_belief.value if my_location_belief else "unknown"
-        
-        # Проверить локацию цели
-        target_location_belief = beliefs_base.get_belief(
-            BeliefType.AGENT,
-            target,
-            "location"
-        )
-        
-        # Если цель в другой локации - сначала переместиться
-        if target_location_belief and target_location_belief.value != my_location:
-            steps.append(PlanStep(
-                action_type=ActionType.MOVE,
-                parameters={"destination": target_location_belief.value},
-                description=f"Переместиться в {target_location_belief.value}",
-                estimated_duration=2.0
-            ))
-        
-        # Начать разговор
+
+        # ── Шаг 0: Войти в диалог ─────────────────────────────────
         steps.append(PlanStep(
-            action_type=ActionType.COMMUNICATE,
-            parameters={
-                "target": target,
-                "message_type": "greeting",
-                "topic": desire.description
-            },
-            description=f"Начать разговор с {target}",
-            estimated_duration=1.0
-        ))
-        
-        # Обменяться информацией
-        steps.append(PlanStep(
-            action_type=ActionType.COMMUNICATE,
-            parameters={
-                "target": target,
-                "message_type": "exchange"
-            },
-            description="Обменяться информацией",
-            estimated_duration=2.0
-        ))
-        
-        # Завершить разговор
-        steps.append(PlanStep(
-            action_type=ActionType.COMMUNICATE,
-            parameters={
-                "target": target,
-                "message_type": "farewell"
-            },
-            description="Попрощаться",
+            action_type=ActionType.INITIATE_CONVERSATION,
+            parameters={"target": target, "topic": topic},
+            description=f"Войти в диалог с {target}",
             estimated_duration=0.5
         ))
-        
+
+        # ── Шаг 1: Первое сообщение (зависит от роли) ────────────
+        if role == 'initiator':
+            message_type = "greeting"
+            desc = f"Поздороваться с {target}"
+            requires_response = True
+        else:
+            message_type = "answer"
+            desc = f"Ответить {target}"
+            requires_response = False
+
+        send_params = {
+            "target": target,
+            "message_type": message_type,
+            "topic": topic,
+            "requires_response": requires_response,
+            "tone": "friendly"
+        }
+        if msg_id:
+            send_params["in_reply_to"] = msg_id
+        if incoming:
+            send_params["incoming_content"] = incoming
+
+        steps.append(PlanStep(
+            action_type=ActionType.SEND_MESSAGE,
+            parameters=send_params,
+            description=desc,
+            estimated_duration=1.5
+        ))
+
+        # ── Шаг 2: Следующее действие (из LLM или fallback) ───────
+        next_steps = self._get_next_steps_from_llm(
+            desire=desire,
+            agent_id=agent_id,
+            conversation_history=conversation_history or [],
+            social_battery=social_battery,
+            personality=personality or {},
+            target=target,
+            topic=topic
+        )
+        steps.extend(next_steps)
+
         return Plan(
             goal=desire.description,
             steps=steps,
-            expected_outcome=f"Успешный разговор с {target}"
+            expected_outcome=f"Диалог с {target} {'начат' if role == 'initiator' else 'продолжен'}"
         )
-    
-    def _create_movement_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
-        """План для перемещения"""
-        # Извлечь пункт назначения из описания
-        destination = desire.context.get('destination', 'cafe')
-        
-        steps = [
-            PlanStep(
-                action_type=ActionType.MOVE,
-                parameters={"destination": destination},
-                description=f"Переместиться в {destination}",
-                estimated_duration=2.0
+
+    def extend_conversation_plan(
+        self,
+        intention,             # Intention объект с текущим планом
+        desire,
+        agent_id: str,
+        conversation_history: List[Dict] = None,
+        social_battery: float = 1.0,
+        personality: Dict = None,
+        force_end: bool = False
+    ) -> None:
+        """
+        Достраивает план в процессе диалога: добавляет 1–2 шага к концу плана.
+        Вызывается из deliberation_cycle после получения нового входящего сообщения.
+
+        force_end=True: принудительно добавить farewell + end_conversation (WRAP_UP).
+        """
+        target = desire.context.get('target_agent', '')
+        topic = desire.context.get('topic', 'general')
+        plan = intention.plan
+
+        if force_end:
+            # WRAP_UP — заменяем оставшиеся шаги на прощание
+            remaining = plan.get_remaining_steps()
+            for s in remaining:
+                s.executed = True
+                s.success = False
+                s.timed_out = True
+
+            plan.steps.extend([
+                PlanStep(
+                    action_type=ActionType.SEND_MESSAGE,
+                    parameters={
+                        "target": target, "message_type": "farewell",
+                        "requires_response": False, "tone": "friendly"
+                    },
+                    description="Попрощаться",
+                    estimated_duration=1.0
+                ),
+                PlanStep(
+                    action_type=ActionType.END_CONVERSATION,
+                    parameters={"target": target},
+                    description="Завершить разговор",
+                    estimated_duration=0.5
+                )
+            ])
+            plan.estimated_total_duration = sum(s.estimated_duration for s in plan.steps)
+            print(f"🏁 [{agent_id}] WRAP_UP: добавлено farewell + end_conversation")
+            return
+
+        # Нормальное расширение плана через LLM
+        next_steps = self._get_next_steps_from_llm(
+            desire=desire,
+            agent_id=agent_id,
+            conversation_history=conversation_history or [],
+            social_battery=social_battery,
+            personality=personality or {},
+            target=target,
+            topic=topic
+        )
+        plan.steps.extend(next_steps)
+        plan.estimated_total_duration = sum(s.estimated_duration for s in plan.steps)
+
+    # ── Внутренние хелперы ────────────────────────────────────────────
+
+    def _get_next_steps_from_llm(
+        self,
+        desire,
+        agent_id: str,
+        conversation_history: List[Dict],
+        social_battery: float,
+        personality: Dict,
+        target: str,
+        topic: str
+    ) -> List[PlanStep]:
+        """
+        Запрашивает LLM за следующими 1–2 шагами плана.
+        Возвращает список PlanStep готовых к добавлению в план.
+        Fallback при сбое: [WAIT_FOR_RESPONSE] или [END_CONVERSATION].
+        """
+        if self.llm is None:
+            return self._fallback_next_steps(target, social_battery)
+
+        try:
+            raw_steps = self.llm.generate_next_plan_step(
+                agent_name=agent_id,
+                agent_id=agent_id,
+                personality=personality,
+                current_desire_description=desire.description,
+                conversation_history=conversation_history,
+                social_battery=social_battery
             )
-        ]
-        
-        return Plan(
-            goal=desire.description,
-            steps=steps,
-            expected_outcome=f"Находиться в {destination}"
-        )
-    
-    def _create_search_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
-        """План для поиска чего-то"""
-        search_query = desire.context.get('search_query', desire.description)
-        
-        steps = [
+            return self._build_steps_from_action_list(raw_steps, target, topic, social_battery)
+        except Exception as e:
+            print(f"⚠️ [{agent_id}] _get_next_steps_from_llm failed: {e}. Fallback.")
+            return self._fallback_next_steps(target, social_battery)
+
+    def _build_steps_from_action_list(
+        self,
+        action_list: List[str],
+        target: str,
+        topic: str,
+        social_battery: float
+    ) -> List[PlanStep]:
+        """Конвертирует список строк ActionType в PlanStep объекты."""
+        steps = []
+        for action_str in action_list[:2]:  # максимум 2 шага
+            atype = _ACTION_STRING_MAP.get(action_str.lower())
+            if atype is None:
+                continue
+
+            if atype == ActionType.SEND_MESSAGE:
+                msg_type = "farewell" if social_battery < 0.2 else "statement"
+                steps.append(PlanStep(
+                    action_type=ActionType.SEND_MESSAGE,
+                    parameters={
+                        "target": target, "message_type": msg_type,
+                        "topic": topic, "requires_response": False, "tone": "friendly"
+                    },
+                    description=f"Продолжить разговор с {target}",
+                    estimated_duration=1.5
+                ))
+            elif atype == ActionType.WAIT_FOR_RESPONSE:
+                steps.append(PlanStep(
+                    action_type=ActionType.WAIT_FOR_RESPONSE,
+                    parameters={
+                        "expected_from": target,
+                        "timeout": 30.0,
+                        "max_ticks": 6,
+                        "on_timeout": "end"
+                    },
+                    description=f"Ждать ответа {target}",
+                    estimated_duration=5.0
+                ))
+            elif atype == ActionType.END_CONVERSATION:
+                steps.append(PlanStep(
+                    action_type=ActionType.END_CONVERSATION,
+                    parameters={"target": target},
+                    description="Завершить разговор",
+                    estimated_duration=0.5
+                ))
+            elif atype == ActionType.THINK:
+                steps.append(PlanStep(
+                    action_type=ActionType.THINK,
+                    parameters={"topic": "диалог"},
+                    description="Задуматься о разговоре",
+                    estimated_duration=1.0
+                ))
+            elif atype == ActionType.RESPOND_TO_MESSAGE:
+                steps.append(PlanStep(
+                    action_type=ActionType.RESPOND_TO_MESSAGE,
+                    parameters={
+                        "target": target, "message_type": "answer",
+                        "topic": topic, "requires_response": False
+                    },
+                    description=f"Ответить {target}",
+                    estimated_duration=1.5
+                ))
+        return steps
+
+    def _fallback_next_steps(self, target: str, social_battery: float) -> List[PlanStep]:
+        """Fallback план при недоступности LLM."""
+        if social_battery < 0.3:
+            # Сил мало — сразу прощаться
+            return [
+                PlanStep(
+                    action_type=ActionType.SEND_MESSAGE,
+                    parameters={
+                        "target": target, "message_type": "farewell",
+                        "requires_response": False, "tone": "friendly"
+                    },
+                    description="Попрощаться",
+                    estimated_duration=1.0
+                ),
+                PlanStep(
+                    action_type=ActionType.END_CONVERSATION,
+                    parameters={"target": target},
+                    description="Завершить разговор",
+                    estimated_duration=0.5
+                )
+            ]
+        # Нормальное состояние — ждём ответа
+        return [
             PlanStep(
-                action_type=ActionType.SEARCH,
-                parameters={"query": search_query},
-                description=f"Искать: {search_query}",
-                estimated_duration=3.0
-            ),
-            PlanStep(
-                action_type=ActionType.OBSERVE,
-                parameters={},
-                description="Изучить результаты поиска",
-                estimated_duration=2.0
-            ),
-            PlanStep(
-                action_type=ActionType.THINK,
-                parameters={"topic": search_query},
-                description="Оценить найденное",
-                estimated_duration=1.0
-            )
-        ]
-        
-        return Plan(
-            goal=desire.description,
-            steps=steps,
-            expected_outcome="Найти искомое"
-        )
-    
-    def _create_learning_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
-        """План для изучения чего-то"""
-        topic = desire.context.get('topic', 'general knowledge')
-        
-        steps = [
-            PlanStep(
-                action_type=ActionType.MOVE,
-                parameters={"destination": "library"},
-                description="Пойти в библиотеку",
-                estimated_duration=2.0
-            ),
-            PlanStep(
-                action_type=ActionType.SEARCH,
-                parameters={"query": topic},
-                description=f"Найти материалы по теме: {topic}",
-                estimated_duration=2.0
-            ),
-            PlanStep(
-                action_type=ActionType.OBSERVE,
-                parameters={"subject": topic},
-                description="Изучить материал",
-                estimated_duration=4.0
-            ),
-            PlanStep(
-                action_type=ActionType.THINK,
-                parameters={"topic": topic},
-                description="Обдумать полученную информацию",
-                estimated_duration=2.0
-            )
-        ]
-        
-        return Plan(
-            goal=desire.description,
-            steps=steps,
-            expected_outcome=f"Получить знания по теме: {topic}"
-        )
-    
-    def _create_help_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
-        """План для помощи кому-то"""
-        target = desire.context.get('target_agent', 'someone')
-        
-        steps = [
-            PlanStep(
-                action_type=ActionType.COMMUNICATE,
+                action_type=ActionType.WAIT_FOR_RESPONSE,
                 parameters={
-                    "target": target,
-                    "message_type": "offer_help"
+                    "expected_from": target,
+                    "timeout": 30.0, "max_ticks": 6, "on_timeout": "end"
                 },
-                description=f"Предложить помощь {target}",
-                estimated_duration=1.0
+                description=f"Ждать ответа {target}",
+                estimated_duration=5.0
             ),
             PlanStep(
-                action_type=ActionType.WAIT,
-                parameters={"for": "response"},
-                description="Дождаться ответа",
-                estimated_duration=1.0
-            ),
-            PlanStep(
-                action_type=ActionType.HELP,
+                action_type=ActionType.END_CONVERSATION,
                 parameters={"target": target},
-                description="Оказать помощь",
-                estimated_duration=3.0
+                description="Завершить разговор",
+                estimated_duration=0.5
             )
         ]
-        
-        return Plan(
-            goal=desire.description,
-            steps=steps,
-            expected_outcome=f"Помочь {target}"
-        )
-    
-    def _create_acquisition_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
-        """План для получения чего-то"""
-        item = desire.context.get('item', 'resource')
-        
-        steps = [
-            PlanStep(
-                action_type=ActionType.SEARCH,
-                parameters={"query": item},
-                description=f"Найти {item}",
-                estimated_duration=2.0
-            ),
-            PlanStep(
-                action_type=ActionType.ACQUIRE,
-                parameters={"item": item},
-                description=f"Получить {item}",
-                estimated_duration=1.0
-            )
-        ]
-        
-        return Plan(
-            goal=desire.description,
-            steps=steps,
-            expected_outcome=f"Иметь {item}"
-        )
-    
+
+    def _find_target_from_beliefs(self, beliefs_base, agent_id: str) -> str:
+        try:
+            try:
+                from core.bdi.beliefs import BeliefType
+            except ImportError:
+                from beliefs import BeliefType
+            agent_beliefs = beliefs_base.get_beliefs_by_type(BeliefType.AGENT)
+            known = list(set(
+                b.subject for b in agent_beliefs if b.subject and b.subject != agent_id
+            ))
+            return known[0] if known else ''
+        except Exception:
+            return ''
+
+    # ── Не-диалоговые планы (без изменений) ──────────────────────────
+
+    def _create_movement_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
+        dest = desire.context.get('destination', 'Центральная площадь')
+        return Plan(goal=desire.description, steps=[
+            PlanStep(action_type=ActionType.MOVE,
+                     parameters={"destination": dest},
+                     description=f"Переместиться в {dest}")
+        ], expected_outcome=f"В {dest}")
+
+    def _create_search_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
+        q = desire.context.get('search_query', desire.description)
+        return Plan(goal=desire.description, steps=[
+            PlanStep(action_type=ActionType.SEARCH, parameters={"query": q},
+                     description=f"Искать: {q}"),
+            PlanStep(action_type=ActionType.OBSERVE, parameters={},
+                     description="Изучить результаты"),
+            PlanStep(action_type=ActionType.THINK, parameters={"topic": q},
+                     description="Осмыслить"),
+        ], expected_outcome="Найти искомое")
+
+    def _create_learning_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
+        topic = desire.context.get('topic', 'general')
+        return Plan(goal=desire.description, steps=[
+            PlanStep(action_type=ActionType.MOVE,
+                     parameters={"destination": "library"}, description="В библиотеку"),
+            PlanStep(action_type=ActionType.SEARCH,
+                     parameters={"query": topic}, description=f"Найти: {topic}"),
+            PlanStep(action_type=ActionType.OBSERVE,
+                     parameters={"subject": topic}, description="Изучить"),
+            PlanStep(action_type=ActionType.THINK,
+                     parameters={"topic": topic}, description="Обдумать"),
+        ], expected_outcome=f"Знания по {topic}")
+
     def _create_generic_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
-        """Общий план (fallback)"""
-        steps = [
-            PlanStep(
-                action_type=ActionType.THINK,
-                parameters={"topic": desire.description},
-                description=f"Обдумать: {desire.description}",
-                estimated_duration=1.0
-            ),
-            PlanStep(
-                action_type=ActionType.OBSERVE,
-                parameters={},
-                description="Оценить ситуацию",
-                estimated_duration=1.0
-            )
-        ]
-        
+        return Plan(goal=desire.description, steps=[
+            PlanStep(action_type=ActionType.THINK,
+                     parameters={"topic": desire.description},
+                     description=f"Обдумать: {desire.description}"),
+            PlanStep(action_type=ActionType.OBSERVE,
+                     parameters={}, description="Оценить ситуацию"),
+        ], expected_outcome="Достичь цели")
+
+    def _create_event_reaction_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
+        """
+        План реакции на внешнее событие: OBSERVE → THINK → MOVE (→ EXPRESS).
+        НЕ содержит социальных действий (send_message, initiate_conversation).
+        LLM-fallback: если планировщик не смог — минимальный [OBSERVE → THINK].
+        """
+        import random
+        event_topic = desire.context.get('topic', desire.description)
+        shelter = random.choice(['Библиотека', 'Кафе', 'Крытый рынок', 'Ратуша', 'Парк'])
+
+        if self.llm is not None:
+            # Полный план с перемещением
+            steps = [
+                PlanStep(action_type=ActionType.OBSERVE,
+                         parameters={"subject": "event"},
+                         description=f"Заметить: {event_topic[:50]}",
+                         estimated_duration=1.0),
+                PlanStep(action_type=ActionType.THINK,
+                         parameters={"topic": event_topic},
+                         description=f"Осмыслить: {event_topic[:40]}",
+                         estimated_duration=2.0),
+                PlanStep(action_type=ActionType.MOVE,
+                         parameters={"destination": shelter, "reason": event_topic[:30]},
+                         description=f"Отреагировать — перейти в {shelter}",
+                         estimated_duration=1.0),
+                PlanStep(action_type=ActionType.EXPRESS,
+                         parameters={"emotion": "reaction", "topic": event_topic},
+                         description="Выразить реакцию на событие",
+                         estimated_duration=1.0),
+            ]
+        else:
+            # Fallback: минимальный план без LLM
+            steps = [
+                PlanStep(action_type=ActionType.OBSERVE,
+                         parameters={"subject": "event"},
+                         description=f"Наблюдать: {event_topic[:50]}",
+                         estimated_duration=1.0),
+                PlanStep(action_type=ActionType.THINK,
+                         parameters={"topic": event_topic},
+                         description=f"Обдумать: {event_topic[:40]}",
+                         estimated_duration=2.0),
+            ]
         return Plan(
             goal=desire.description,
             steps=steps,
-            expected_outcome="Достичь цели"
+            expected_outcome=f"Агент отреагировал на: {event_topic[:40]}"
         )
 
+    def _create_idle_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
+        """Idle Drive план: многошаговая цепочка MOVE → WAIT → OBSERVE → THINK."""
+        import random
+        action_hint = desire.context.get('action', 'observe')
+        dest = desire.context.get('destination', 'Центральная площадь')
+        topic = desire.context.get('topic', 'текущие мысли')
+        idle_label = desire.context.get('idle_label', action_hint)
+        wait_ticks = random.randint(3, 5)
 
-# Utility функции
+        if action_hint == 'move':
+            steps = [
+                PlanStep(action_type=ActionType.MOVE,
+                         parameters={"destination": dest},
+                         description=f"Направиться к {dest}", estimated_duration=1.0),
+                PlanStep(action_type=ActionType.WAIT,
+                         parameters={"ticks": wait_ticks, "duration": wait_ticks, "reason": idle_label},
+                         description=f"{idle_label} в {dest} ({wait_ticks} тиков)",
+                         estimated_duration=float(wait_ticks)),
+                PlanStep(action_type=ActionType.OBSERVE,
+                         parameters={"subject": "surroundings"},
+                         description="Осмотреться", estimated_duration=1.0),
+                PlanStep(action_type=ActionType.THINK,
+                         parameters={"topic": topic or "окружение"},
+                         description="Поразмышлять", estimated_duration=1.0),
+            ]
+        elif action_hint == 'think':
+            steps = [
+                PlanStep(action_type=ActionType.OBSERVE,
+                         parameters={"subject": "inner_state"},
+                         description="Прислушаться к себе", estimated_duration=1.0),
+                PlanStep(action_type=ActionType.WAIT,
+                         parameters={"ticks": wait_ticks, "duration": wait_ticks, "reason": idle_label},
+                         description=f"{idle_label} ({wait_ticks} тиков)",
+                         estimated_duration=float(wait_ticks)),
+                PlanStep(action_type=ActionType.THINK,
+                         parameters={"topic": topic},
+                         description=f"Углубиться: {topic}", estimated_duration=1.5),
+            ]
+        else:  # observe / default
+            wander = random.choice(['Парк', 'Набережная', 'Рыночная площадь', 'Сквер'])
+            steps = [
+                PlanStep(action_type=ActionType.MOVE,
+                         parameters={"destination": wander},
+                         description=f"Неспешно в {wander}", estimated_duration=1.0),
+                PlanStep(action_type=ActionType.OBSERVE,
+                         parameters={"subject": "surroundings"},
+                         description=idle_label, estimated_duration=1.0),
+                PlanStep(action_type=ActionType.WAIT,
+                         parameters={"ticks": wait_ticks, "duration": wait_ticks, "reason": "созерцание"},
+                         description=f"Задержаться ({wait_ticks} тиков)",
+                         estimated_duration=float(wait_ticks)),
+                PlanStep(action_type=ActionType.THINK,
+                         parameters={"topic": "наблюдения и впечатления"},
+                         description="Осмыслить увиденное", estimated_duration=1.0),
+            ]
+        return Plan(goal=desire.description, steps=steps, expected_outcome="Idle-цикл завершён")
+
+    def _create_solo_plan(self, desire, beliefs_base, agent_id: str, mode: str = 'reflection') -> Plan:
+        """Автономный план для несоциальных желаний."""
+        import random
+        if mode == 'reflection':
+            dest = random.choice(['Парк', 'Библиотека', 'Набережная'])
+            topic = desire.context.get('topic', 'недавние события')
+            return Plan(
+                goal=desire.description,
+                steps=[
+                    PlanStep(action_type=ActionType.MOVE,
+                             parameters={"destination": dest},
+                             description=f"Найти тихое место — {dest}",
+                             estimated_duration=1.0),
+                    PlanStep(action_type=ActionType.OBSERVE,
+                             parameters={"subject": "surroundings"},
+                             description="Осмотреться, почувствовать атмосферу",
+                             estimated_duration=1.0),
+                    PlanStep(action_type=ActionType.THINK,
+                             parameters={"topic": topic},
+                             description=f"Поразмышлять о {topic}",
+                             estimated_duration=2.0),
+                    PlanStep(action_type=ActionType.OBSERVE,
+                             parameters={"subject": "inner_state"},
+                             description="Прислушаться к себе",
+                             estimated_duration=1.0),
+                ],
+                expected_outcome="Уединение и размышление"
+            )
+        else:  # organize
+            return Plan(
+                goal=desire.description,
+                steps=[
+                    PlanStep(action_type=ActionType.THINK,
+                             parameters={"topic": "приоритеты и планы"},
+                             description="Обдумать приоритеты",
+                             estimated_duration=1.5),
+                    PlanStep(action_type=ActionType.OBSERVE,
+                             parameters={"subject": "environment"},
+                             description="Оценить обстановку",
+                             estimated_duration=1.0),
+                    PlanStep(action_type=ActionType.SEARCH,
+                             parameters={"query": "полезные ресурсы"},
+                             description="Найти нужные ресурсы",
+                             estimated_duration=1.5),
+                    PlanStep(action_type=ActionType.THINK,
+                             parameters={"topic": "структура дел"},
+                             description="Систематизировать задачи",
+                             estimated_duration=1.0),
+                ],
+                expected_outcome="Дела организованы"
+            )
+
+
+# ── Утилиты ──────────────────────────────────────────────────────────
 
 def create_simple_plan(goal: str, action_type: ActionType, **parameters) -> Plan:
-    """Создать простой план из одного действия"""
-    step = PlanStep(
-        action_type=action_type,
-        parameters=parameters,
-        description=goal
-    )
-    
-    return Plan(
-        goal=goal,
-        steps=[step],
-        expected_outcome=goal
-    )
+    return Plan(goal=goal,
+                steps=[PlanStep(action_type=action_type, parameters=parameters, description=goal)],
+                expected_outcome=goal)
 
 
 def create_multi_step_plan(goal: str, steps: List[Dict[str, Any]]) -> Plan:
-    """
-    Создать план из нескольких шагов
-    
-    Args:
-        goal: Описание цели
-        steps: Список словарей с описанием шагов
-            [
-                {"action": ActionType.MOVE, "params": {...}, "desc": "..."},
-                {"action": ActionType.COMMUNICATE, "params": {...}, "desc": "..."}
-            ]
-    """
-    plan_steps = []
-    
-    for step_data in steps:
-        plan_steps.append(PlanStep(
-            action_type=step_data['action'],
-            parameters=step_data.get('params', {}),
-            description=step_data.get('desc', ''),
-            estimated_duration=step_data.get('duration', 1.0)
-        ))
-    
-    return Plan(
-        goal=goal,
-        steps=plan_steps,
-        expected_outcome=goal
-    )
+    return Plan(goal=goal, steps=[
+        PlanStep(action_type=s['action'], parameters=s.get('params', {}),
+                 description=s.get('desc', ''), estimated_duration=s.get('duration', 1.0))
+        for s in steps
+    ], expected_outcome=goal)
+
+
+def create_response_plan(target_agent: str, message_id: str, topic: str) -> Plan:
+    return Plan(goal=f"Ответить {target_agent}", steps=[
+        PlanStep(action_type=ActionType.RESPOND_TO_MESSAGE,
+                 parameters={"target": target_agent, "in_reply_to": message_id,
+                              "message_type": "answer", "topic": topic,
+                              "requires_response": False},
+                 description=f"Ответить {target_agent}")
+    ], expected_outcome="Ответ отправлен")

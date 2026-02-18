@@ -67,13 +67,6 @@ const generateMockAgents = () => {
     }));
 };
 
-// Компонент заголовка
-const Header = () => (
-    React.createElement('header', { className: 'header' },
-        React.createElement('h1', { className: 'glitch-text', 'data-text': 'КИБЕР РЫВОК' }, 'КИБЕР РЫВОК'),
-        React.createElement('p', null, 'Симулятор автономных AI-агентов // Версия 2.0.77')
-    )
-);
 
 // Компонент карточки агента
 const AgentCard = ({ agent, isSelected, onClick }) => {
@@ -138,14 +131,38 @@ const ControlPanel = ({ agents, onAddEvent, onSendMessage, onSetSpeed, timeSpeed
 
     const handleAddEvent = () => {
         if (newEvent.trim()) {
-            onAddEvent(newEvent);
+            // Send event to backend via WebSocket
+            window.websocketClient.sendMessage({
+                type: 'add_event',
+                event_description: newEvent
+            });
             setNewEvent('');
         }
     };
 
     const handleSendMessage = () => {
         if (messageContent.trim() && recipient) {
-            onSendMessage(recipient, messageContent);
+            // Send message to backend via WebSocket
+            window.websocketClient.sendMessage({
+                type: 'send_message',
+                sender_id: 'user',
+                receiver_id: recipient,
+                content: messageContent
+            });
+            
+            // Add to global messages
+            if (!window.messages[recipient]) {
+                window.messages[recipient] = [];
+            }
+            window.messages[recipient].push({
+                id: Date.now().toString(),
+                sender_id: 'user',
+                receiver_id: recipient,
+                content: messageContent,
+                timestamp: new Date().toLocaleTimeString(),
+                is_user: true
+            });
+            
             setMessageContent('');
             setRecipient('');
         }
@@ -576,37 +593,59 @@ const App = () => {
 
     // Инициализация
     React.useEffect(() => {
-        // Имитация загрузки
-        setTimeout(() => {
-            // Используем данные из глобального состояния
-            const mockAgents = window.agentsData || generateMockAgents();
-            setAgents(mockAgents);
+        // Используем данные из глобального состояния
+        const initialAgents = window.agentsData || generateMockAgents();
+        setAgents(initialAgents);
+        
+        // Добавляем начальные события
+        const initialEvents = [
+            { id: 1, text: 'Система инициализирована. Агенты активированы.', timestamp: new Date().toLocaleTimeString() },
+            { id: 2, text: 'Начало симуляции взаимодействий агентов', timestamp: new Date().toLocaleTimeString() }
+        ];
+        setEvents(initialEvents);
+        
+        document.getElementById('loading').classList.add('hidden');
+        setIsLoading(false);
+        
+        // Set up listener for world state updates
+        const handleWorldState = (worldState) => {
+            if (worldState.agents) {
+                // Update global agents data
+                window.agentsData = worldState.agents;
+                setAgents(worldState.agents);
+                
+                // If we're in group chat view, update selected agents
+                if (window.currentView === 'group-chat' && window.selectedAgents.length > 0) {
+                    // Map the selected agents to the new real agents
+                    const updatedSelectedAgents = window.selectedAgents.map(selectedAgent => {
+                        // Find the corresponding real agent
+                        const realAgent = worldState.agents.find(agent =>
+                            agent.name === selectedAgent.name ||
+                            agent.id == selectedAgent.id
+                        );
+                        return realAgent || selectedAgent;
+                    });
+                    window.selectedAgents = updatedSelectedAgents;
+                }
+            }
             
-            // Добавляем начальные события
-            const initialEvents = [
-                { id: 1, text: 'Система инициализирована. 8 агентов активированы.', timestamp: new Date().toLocaleTimeString() },
-                { id: 2, text: 'Алекса начала анализ окружения', timestamp: new Date().toLocaleTimeString() },
-                { id: 3, text: 'Нексус отправил сообщение Кайросу', timestamp: new Date().toLocaleTimeString() }
-            ];
-            setEvents(initialEvents);
-            
-            document.getElementById('loading').classList.add('hidden');
-            setIsLoading(false);
-        }, 1500);
-
-        // Симуляция входящих событий
-        const interval = setInterval(() => {
-            setEvents(prev => {
-                const newEvent = {
-                    id: Date.now(),
-                    text: generateRandomEvent(),
-                    timestamp: new Date().toLocaleTimeString()
-                };
-                return [newEvent, ...prev.slice(0, 49)];
-            });
-        }, 3000);
-
-        return () => clearInterval(interval);
+            // Convert recent events to display format
+            if (worldState.recent_events) {
+                const formattedEvents = worldState.recent_events.map(event => ({
+                    id: event.id,
+                    text: event.description || event.type,
+                    timestamp: new Date(event.timestamp * 1000).toLocaleTimeString()
+                }));
+                setEvents(formattedEvents);
+            }
+        };
+        
+        window.websocketClient.on('world_state', handleWorldState);
+        
+        // Clean up listener
+        return () => {
+            window.websocketClient.off('world_state', handleWorldState);
+        };
     }, []);
 
     const generateRandomEvent = () => {
@@ -682,14 +721,15 @@ const App = () => {
         )
     ];
 
+    // Create navigation component to be used in header
+    const navigationComponent = React.createElement(Navigation, {
+        currentPage: window.currentView,
+        onNavigate: (page) => window.setView(page)
+    });
+
     // Отображение страницы профиля агента
     if (window.currentView === 'agent-profile' && window.selectedAgent) {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'agent-profile',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement(AgentProfile, {
                 agent: window.selectedAgent,
                 onBack: () => window.setView('agents'),
@@ -704,11 +744,6 @@ const App = () => {
     // Отображение страницы чатов
     if (window.currentView === 'chat') {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'chat',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement(ChatView, {
                 onBack: () => window.setView('dashboard')
             })
@@ -718,13 +753,27 @@ const App = () => {
     // Отображение страницы аналитики
     if (window.currentView === 'analytics') {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'analytics',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement(Analytics, {
                 onBack: () => window.setView('dashboard')
+            })
+        );
+    }
+
+    // Отображение страницы создания агента
+    if (window.currentView === 'create-agent') {
+        return React.createElement('div', { className: 'container' },
+            React.createElement(AgentCreator, {
+                onBack: () => window.setView('dashboard'),
+                onCreateAgent: (agent) => {
+                    // Update global agents data
+                    if (!window.agentsData) {
+                        window.agentsData = [];
+                    }
+                    window.agentsData.push(agent);
+                    
+                    // Refresh agents list in state
+                    setAgents([...agents, agent]);
+                }
             })
         );
     }
@@ -733,11 +782,6 @@ const App = () => {
     if (window.currentView === 'agents') {
         // Отображение списка агентов
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'agents',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement('div', { className: 'dashboard' },
                 React.createElement('div', { className: 'panel agents-panel' },
                     React.createElement('div', { className: 'panel-corner panel-corner-tl' }),
@@ -756,11 +800,6 @@ const App = () => {
     // Отображение группового чата
     if (window.currentView === 'group-chat' && window.selectedAgents.length > 0) {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'group-chat',
-                onNavigate: (page) => window.setView(page)
-            }),
             React.createElement(GroupChat, {
                 agents: window.selectedAgents,
                 onBack: () => window.setView('agents'),
@@ -774,12 +813,6 @@ const App = () => {
     // Отображение основной панели мониторинга
     if (window.currentView === 'dashboard') {
         return React.createElement('div', { className: 'container' },
-            React.createElement(Header),
-            React.createElement(Navigation, {
-                currentPage: 'dashboard',
-                onNavigate: (page) => window.setView(page)
-            }),
-            
             React.createElement('div', { className: 'stats-bar' }, statItems),
 
             React.createElement('div', { className: 'dashboard' },
@@ -819,12 +852,6 @@ const App = () => {
     
     // Отображение основной панели мониторинга по умолчанию
     return React.createElement('div', { className: 'container' },
-        React.createElement(Header),
-        React.createElement(Navigation, {
-            currentPage: 'dashboard',
-            onNavigate: (page) => window.setView(page)
-        }),
-        
         React.createElement('div', { className: 'stats-bar' }, statItems),
 
         React.createElement('div', { className: 'dashboard' },
