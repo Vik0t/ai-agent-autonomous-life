@@ -121,6 +121,7 @@ class DeliberationCycle:
         desires.extend(new_desires)
 
         # ── 3b. Страховочный Idle Drive ──────────────────────────────
+        # Только если нет ни одного активного не-социального желания И нет намерений
         has_any_nonsocial = any(
             d.status in [DesireStatus.ACTIVE, DesireStatus.PURSUED]
             and d.motivation_type != MotivationType.SOCIAL
@@ -143,13 +144,50 @@ class DeliberationCycle:
                 print(f"💤 [{agent_id}] Страховочный Idle Drive: «{idle.description}»")
 
         # ── 4. Реактивное прерывание ─────────────────────────────────
+        # Приоритет: world_event > user_message > incoming_message
+
+        # ── 4a. World Event (Tier 5 — прерывает ВСЁ кроме user) ─────
+        world_event_desire = next(
+            (d for d in desires
+             if d.source == 'world_event' and d.status == DesireStatus.ACTIVE),
+            None
+        )
+        event_suspended = []
+        if world_event_desire:
+            for intention in intentions:
+                if (intention.status == IntentionStatus.ACTIVE
+                        and intention.interruptible
+                        # Защищаем user_message намерения
+                        and 'user' not in (intention.desire_description or '').lower()):
+                    intention.suspend(reason=f"World Event: {world_event_desire.description[:40]}")
+                    event_suspended.append(intention)
+            if event_suspended:
+                print(f"🚨 [{agent_id}] WORLD EVENT: прервано {len(event_suspended)} намерений")
+
+        # ── 4b. User message (Tier 5) ─────────────────────────────────
+        user_desire = next(
+            (d for d in desires
+             if d.source == 'user_message' and d.status == DesireStatus.ACTIVE),
+            None
+        )
+        user_suspended = []
+        if user_desire and not world_event_desire:
+            for intention in intentions:
+                if (intention.status == IntentionStatus.ACTIVE
+                        and intention.interruptible):
+                    intention.suspend(reason=f"User message interrupt")
+                    user_suspended.append(intention)
+            if user_suspended:
+                print(f"👑 [{agent_id}] USER INTERRUPT: прервано {len(user_suspended)} намерений")
+
+        # ── 4c. Обычный incoming_message (Tier 4) ────────────────────
         urgent_social = next(
             (d for d in desires
              if d.source == 'incoming_message' and d.status == DesireStatus.ACTIVE),
             None
         )
         suspended_now = []
-        if urgent_social:
+        if urgent_social and not world_event_desire and not user_desire:
             already_responding = any(
                 i.status == IntentionStatus.ACTIVE and not i.interruptible
                 for i in intentions
@@ -159,7 +197,7 @@ class DeliberationCycle:
                     intentions, urgent_social
                 )
                 if suspended_now:
-                    print(f"⚡ [{agent_id}] Прерывание для ответа «{urgent_social.description}» "
+                    print(f"⚡ [{agent_id}] Прерывание для «{urgent_social.description}» "
                           f"→ пауза {len(suspended_now)} намерений")
 
         # ── 5. FIX 1: Анализ диалога через LLM ──────────────────────
@@ -243,25 +281,63 @@ class DeliberationCycle:
                         )
                         print(f"🔧 [{agent_id}] Достройка плана для {partner_id}")
 
-        # ── 7. Intention selection ───────────────────────────────────
+        # ── 7. Intention selection (иерархия приоритетов) ────────────
+        # Tier 5: world_event / user_message  → priority 1.0
+        # Tier 4: incoming_message            → priority 0.90
+        # Tier 3: llm_dynamic (SOCIAL)        → priority 0.65
+        # Tier 2: llm_dynamic (non-SOCIAL)    → priority 0.40
+        # Tier 1: idle_drive                  → priority 0.10
         new_intention = None
         has_active = any(i.status == IntentionStatus.ACTIVE for i in intentions)
 
         if not has_active:
-            selected = self.intention_selector.select_intention(
-                desires=desires,
-                current_intentions=intentions,
-                beliefs_base=beliefs,
-                max_intentions=max_intentions
-            )
+            selected = self._select_desire_by_tier(desires, intentions, beliefs)
             if selected:
                 plan = self.planner.create_plan(selected, beliefs, agent_id)
+
+                # ── Fallback: если plan пустой (LLM сбой), создаём минимальный ──
+                if not plan or not plan.steps:
+                    print(f"⚠️ [{agent_id}] Пустой план для «{selected.description[:40]}» "
+                          f"→ Fallback [OBSERVE→THINK]")
+                    from .plans import Plan, PlanStep, ActionType as AT
+                    plan = Plan(
+                        goal=selected.description,
+                        steps=[
+                            PlanStep(action_type=AT.OBSERVE,
+                                     parameters={"subject": "event"},
+                                     description="Наблюдать за происходящим",
+                                     estimated_duration=1.0),
+                            PlanStep(action_type=AT.THINK,
+                                     parameters={"topic": selected.description},
+                                     description="Обдумать ситуацию",
+                                     estimated_duration=2.0),
+                        ],
+                        expected_outcome="Fallback: реакция на событие"
+                    )
+
                 new_intention = create_intention_from_desire(selected, plan)
+
+                # Tier 5 намерения — не прерываемые
+                if selected.source in ('world_event', 'user_message'):
+                    new_intention.interruptible = False
+                    new_intention.priority = 1.0
+
                 intentions.append(new_intention)
                 selected.status = DesireStatus.PURSUED
+
+                # ── FIX: world_event desires — помечаем ACHIEVED сразу ──
+                # Это предотвращает повторную реакцию на одно и то же событие
+                # в следующих тиках (без этого агент "застрял" бы в PURSUED навсегда)
+                if selected.source == 'world_event':
+                    selected.status = DesireStatus.ACHIEVED
+                    print(f"✅ [{agent_id}] World event desire ACHIEVED on intention creation "
+                          f"— не повторяем реакцию")
+                print(f"🎯 [{agent_id}] Выбрано желание Tier={self._get_tier_label(selected)}: "
+                      f"«{selected.description[:50]}» (priority={selected.priority:.2f})")
             else:
                 has_any_active_or_social_desire = any(
-                    d.source == 'incoming_message' and d.status == DesireStatus.ACTIVE
+                    d.source in ('incoming_message', 'user_message')
+                    and d.status == DesireStatus.ACTIVE
                     for d in desires
                 )
                 if not has_any_active_or_social_desire:
@@ -300,6 +376,8 @@ class DeliberationCycle:
                 'total_desires': len(desires),
                 'total_beliefs': len(beliefs),
                 'interrupted': len(suspended_now),
+                'event_interrupted': len(event_suspended),
+                'user_interrupted': len(user_suspended),
                 'social_battery': social_battery,
                 'wrap_up_triggered': len(wrap_up_created_for),
                 'force_quit_count': len(self._force_quit_partners)
@@ -472,8 +550,8 @@ class DeliberationCycle:
         # Чистим wrap_up флаги для удалённых намерений
         self._wrap_up_issued -= ids_to_remove
 
-    def notify_conversation_ended(self, partner_id: str):
-        self.desire_generator.mark_conversation_ended(partner_id)
+    def notify_conversation_ended(self, partner_id: str, personality: Dict[str, float] = None):
+        self.desire_generator.mark_conversation_ended(partner_id, personality)
         self._conversation_turn_counts.pop(partner_id, None)
         self._force_quit_partners.discard(partner_id)
 
@@ -483,6 +561,63 @@ class DeliberationCycle:
         needed = self.desire_generator.MIN_SOLO_ACTIONS
         if count <= needed:
             print(f"🔨 Solo action «{action_type}»: {count}/{needed} до разблокировки соц.")
+
+    # ── Tier-aware desire selector ────────────────────────────────────
+
+    _TIER_ORDER = ('world_event', 'user_message', 'incoming_message',
+                   'deep_work_reject', 'wrap_up', 'llm_dynamic', 'llm_fallback',
+                   'idle_drive')
+
+    def _select_desire_by_tier(
+        self,
+        desires: List[Desire],
+        intentions: List[Intention],
+        beliefs
+    ) -> Optional[Desire]:
+        """
+        Выбирает желание по строгой иерархии тиров:
+          Tier 5 (priority ≥ 0.99): world_event, user_message
+          Tier 4 (priority ≥ 0.85): incoming_message, wrap_up
+          Tier 3 (priority ≥ 0.55): llm_dynamic SOCIAL
+          Tier 2 (priority ≥ 0.30): llm_dynamic non-SOCIAL, llm_fallback
+          Tier 1 (всё остальное): idle_drive
+        Внутри тира — по calculate_utility() (priority × urgency × alignment).
+        """
+        pursued_ids = {
+            i.desire_id for i in intentions
+            if i.status in (IntentionStatus.ACTIVE, IntentionStatus.SUSPENDED,
+                            IntentionStatus.COMPLETED)
+        }
+
+        candidates = [
+            d for d in desires
+            if d.status == DesireStatus.ACTIVE
+            and d.id not in pursued_ids
+            and not d.is_expired()
+            and d.is_achievable(beliefs.query)
+        ]
+
+        if not candidates:
+            return None
+
+        # Сортируем: сначала по priority убыванию, потом по utility убыванию
+        candidates.sort(key=lambda d: (d.priority, d.calculate_utility()), reverse=True)
+
+        best = candidates[0]
+        return best
+
+    @staticmethod
+    def _get_tier_label(desire: Desire) -> str:
+        p = desire.priority
+        if p >= 0.99:
+            return "5(ABSOLUTE)"
+        if p >= 0.85:
+            return "4(HIGH)"
+        if p >= 0.55:
+            return "3(SOCIAL)"
+        if p >= 0.30:
+            return "2(MEDIUM)"
+        return "1(IDLE)"
 
     def get_statistics(self) -> Dict[str, Any]:
         return {

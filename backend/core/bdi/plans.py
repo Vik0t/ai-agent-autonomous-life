@@ -163,9 +163,13 @@ class Planner:
 
     def create_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
         desc = desire.description.lower()
+        source = getattr(desire, 'source', '')
+        mtype = getattr(desire, 'motivation_type', None)
+        ctx = getattr(desire, 'context', {}) or {}
 
-        # ── Диалоговые планы (теперь через create_dynamic_plan) ──────
-        if desire.source == 'incoming_message' or desc.startswith('ответить'):
+        # ── Диалоговые планы ─────────────────────────────────────────
+        # 1. Ответ на входящее сообщение (responder)
+        if source in ('incoming_message', 'user_message') or desc.startswith('ответить'):
             return self.create_dynamic_plan(
                 desire=desire,
                 beliefs_base=beliefs_base,
@@ -173,14 +177,43 @@ class Planner:
                 role='responder'
             )
 
-        # Idle Drive — одно простое действие
-        if getattr(desire, 'source', '') == 'idle_drive' or desire.context.get('is_idle'):
-            return self._create_idle_plan(desire, beliefs_base, agent_id)
+        # 2. Deep Work busy-signal
+        if source == 'deep_work_reject':
+            target = ctx.get('target_agent', '')
+            busy_msg = ctx.get('busy_message',
+                               "Я сейчас глубоко сосредоточен, не могу отвлечься.")
+            return Plan(
+                goal=desire.description,
+                steps=[PlanStep(
+                    action_type=ActionType.SEND_MESSAGE,
+                    parameters={"target": target, "message_type": "statement",
+                                "content": busy_msg, "requires_response": False,
+                                "tone": "polite_busy"},
+                    description=f"Сообщить {target}: занят",
+                    estimated_duration=0.5
+                )],
+                expected_outcome="Партнёр уведомлён о занятости"
+            )
 
-        # Социальное желание — инициатор через динамический план
+        # 3. Реакция на мировое событие
+        if ctx.get('is_event_reaction') or source == 'world_event':
+            return self._create_event_reaction_plan(desire, beliefs_base, agent_id)
+
+        # 4. LLM / любое SOCIAL желание с target_agent — инициатор диалога
+        try:
+            from .desires import MotivationType as MT
+        except ImportError:
+            try:
+                from desires import MotivationType as MT
+            except ImportError:
+                MT = None
+        is_social_type = (MT is not None and mtype == MT.SOCIAL)
+        has_target = bool(ctx.get('target_agent'))
         social_kw = ['поговорить', 'общаться', 'сказать', 'пообщаться',
-                     'поделиться', 'помочь', 'найти утешение']
-        if any(w in desc for w in social_kw):
+                     'поделиться', 'помочь', 'найти утешение',
+                     'встретиться', 'поболтать', 'навестить']
+
+        if (is_social_type and has_target) or any(w in desc for w in social_kw):
             return self.create_dynamic_plan(
                 desire=desire,
                 beliefs_base=beliefs_base,
@@ -188,13 +221,17 @@ class Planner:
                 role='initiator'
             )
 
+        # ── Не-диалоговые планы ───────────────────────────────────────
+        # Idle Drive
+        if source == 'idle_drive' or ctx.get('is_idle'):
+            return self._create_idle_plan(desire, beliefs_base, agent_id)
+
         if any(w in desc for w in ['пойти', 'переместиться', 'идти', 'прогуляться']):
             return self._create_movement_plan(desire, beliefs_base, agent_id)
         if any(w in desc for w in ['найти', 'искать', 'поиск']):
             return self._create_search_plan(desire, beliefs_base, agent_id)
         if any(w in desc for w in ['изучить', 'узнать', 'прочитать', 'исследовать']):
             return self._create_learning_plan(desire, beliefs_base, agent_id)
-
         if any(w in desc for w in ['тихое место', 'размышлени', 'побыть одному', 'уединени']):
             return self._create_solo_plan(desire, beliefs_base, agent_id, mode='reflection')
         if any(w in desc for w in ['организовать', 'упорядочить', 'дела']):
@@ -550,35 +587,110 @@ class Planner:
                      parameters={}, description="Оценить ситуацию"),
         ], expected_outcome="Достичь цели")
 
+    def _create_event_reaction_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
+        """
+        План реакции на внешнее событие: OBSERVE → THINK → MOVE (→ EXPRESS).
+        НЕ содержит социальных действий (send_message, initiate_conversation).
+        LLM-fallback: если планировщик не смог — минимальный [OBSERVE → THINK].
+        """
+        import random
+        event_topic = desire.context.get('topic', desire.description)
+        shelter = random.choice(['Библиотека', 'Кафе', 'Крытый рынок', 'Ратуша', 'Парк'])
+
+        if self.llm is not None:
+            # Полный план с перемещением
+            steps = [
+                PlanStep(action_type=ActionType.OBSERVE,
+                         parameters={"subject": "event"},
+                         description=f"Заметить: {event_topic[:50]}",
+                         estimated_duration=1.0),
+                PlanStep(action_type=ActionType.THINK,
+                         parameters={"topic": event_topic},
+                         description=f"Осмыслить: {event_topic[:40]}",
+                         estimated_duration=2.0),
+                PlanStep(action_type=ActionType.MOVE,
+                         parameters={"destination": shelter, "reason": event_topic[:30]},
+                         description=f"Отреагировать — перейти в {shelter}",
+                         estimated_duration=1.0),
+                PlanStep(action_type=ActionType.EXPRESS,
+                         parameters={"emotion": "reaction", "topic": event_topic},
+                         description="Выразить реакцию на событие",
+                         estimated_duration=1.0),
+            ]
+        else:
+            # Fallback: минимальный план без LLM
+            steps = [
+                PlanStep(action_type=ActionType.OBSERVE,
+                         parameters={"subject": "event"},
+                         description=f"Наблюдать: {event_topic[:50]}",
+                         estimated_duration=1.0),
+                PlanStep(action_type=ActionType.THINK,
+                         parameters={"topic": event_topic},
+                         description=f"Обдумать: {event_topic[:40]}",
+                         estimated_duration=2.0),
+            ]
+        return Plan(
+            goal=desire.description,
+            steps=steps,
+            expected_outcome=f"Агент отреагировал на: {event_topic[:40]}"
+        )
+
     def _create_idle_plan(self, desire, beliefs_base, agent_id: str) -> Plan:
-        """Idle Drive план: одно простое несоциальное действие."""
+        """Idle Drive план: многошаговая цепочка MOVE → WAIT → OBSERVE → THINK."""
+        import random
         action_hint = desire.context.get('action', 'observe')
         dest = desire.context.get('destination', 'Центральная площадь')
         topic = desire.context.get('topic', 'текущие мысли')
+        idle_label = desire.context.get('idle_label', action_hint)
+        wait_ticks = random.randint(3, 5)
 
         if action_hint == 'move':
-            steps = [PlanStep(
-                action_type=ActionType.MOVE,
-                parameters={"destination": dest},
-                description=f"Прогуляться к {dest}",
-                estimated_duration=1.0
-            )]
+            steps = [
+                PlanStep(action_type=ActionType.MOVE,
+                         parameters={"destination": dest},
+                         description=f"Направиться к {dest}", estimated_duration=1.0),
+                PlanStep(action_type=ActionType.WAIT,
+                         parameters={"ticks": wait_ticks, "duration": wait_ticks, "reason": idle_label},
+                         description=f"{idle_label} в {dest} ({wait_ticks} тиков)",
+                         estimated_duration=float(wait_ticks)),
+                PlanStep(action_type=ActionType.OBSERVE,
+                         parameters={"subject": "surroundings"},
+                         description="Осмотреться", estimated_duration=1.0),
+                PlanStep(action_type=ActionType.THINK,
+                         parameters={"topic": topic or "окружение"},
+                         description="Поразмышлять", estimated_duration=1.0),
+            ]
         elif action_hint == 'think':
-            steps = [PlanStep(
-                action_type=ActionType.THINK,
-                parameters={"topic": topic},
-                description="Мечтать и размышлять",
-                estimated_duration=1.0
-            )]
-        else:
-            steps = [PlanStep(
-                action_type=ActionType.OBSERVE,
-                parameters={"subject": "surroundings"},
-                description="Осмотреться вокруг",
-                estimated_duration=1.0
-            )]
-
-        return Plan(goal=desire.description, steps=steps, expected_outcome="Idle завершён")
+            steps = [
+                PlanStep(action_type=ActionType.OBSERVE,
+                         parameters={"subject": "inner_state"},
+                         description="Прислушаться к себе", estimated_duration=1.0),
+                PlanStep(action_type=ActionType.WAIT,
+                         parameters={"ticks": wait_ticks, "duration": wait_ticks, "reason": idle_label},
+                         description=f"{idle_label} ({wait_ticks} тиков)",
+                         estimated_duration=float(wait_ticks)),
+                PlanStep(action_type=ActionType.THINK,
+                         parameters={"topic": topic},
+                         description=f"Углубиться: {topic}", estimated_duration=1.5),
+            ]
+        else:  # observe / default
+            wander = random.choice(['Парк', 'Набережная', 'Рыночная площадь', 'Сквер'])
+            steps = [
+                PlanStep(action_type=ActionType.MOVE,
+                         parameters={"destination": wander},
+                         description=f"Неспешно в {wander}", estimated_duration=1.0),
+                PlanStep(action_type=ActionType.OBSERVE,
+                         parameters={"subject": "surroundings"},
+                         description=idle_label, estimated_duration=1.0),
+                PlanStep(action_type=ActionType.WAIT,
+                         parameters={"ticks": wait_ticks, "duration": wait_ticks, "reason": "созерцание"},
+                         description=f"Задержаться ({wait_ticks} тиков)",
+                         estimated_duration=float(wait_ticks)),
+                PlanStep(action_type=ActionType.THINK,
+                         parameters={"topic": "наблюдения и впечатления"},
+                         description="Осмыслить увиденное", estimated_duration=1.0),
+            ]
+        return Plan(goal=desire.description, steps=steps, expected_outcome="Idle-цикл завершён")
 
     def _create_solo_plan(self, desire, beliefs_base, agent_id: str, mode: str = 'reflection') -> Plan:
         """Автономный план для несоциальных желаний."""

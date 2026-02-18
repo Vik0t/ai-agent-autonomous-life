@@ -375,13 +375,39 @@ class IntentionSelector:
 # Utility функции
 
 def create_intention_from_desire(desire, plan) -> Intention:
-    """Создать намерение из желания и плана"""
-    # Социальные намерения (ответ на сообщение, инициация) — не прерываемы.
-    # Рутинные (think, move, observe, learn) — прерываемы.
-    SOCIAL_SOURCES = {'incoming_message', 'personality_extraversion',
-                      'personality_agreeableness', 'emotion_happiness', 'emotion_sadness'}
-    is_social = getattr(desire, 'source', '') in SOCIAL_SOURCES
-    interruptible = not is_social
+    """Создать намерение из желания и плана.
+
+    Правило прерываемости (interruptible):
+      - Рутинные (think, move, observe, idle_drive, llm_fallback) → прерываемые
+      - Любое социальное намерение (ответ, инициация, user) → НЕ прерываемые
+    """
+    SOCIAL_SOURCES = {
+        'incoming_message', 'user_message', 'wrap_up', 'deep_work_reject',
+        'personality_extraversion', 'personality_agreeableness',
+        'emotion_happiness', 'emotion_sadness',
+    }
+    source = getattr(desire, 'source', '')
+    mtype = getattr(desire, 'motivation_type', None)
+
+    # Любое SOCIAL / world_event / user желание — не прерываем
+    try:
+        from .desires import MotivationType
+    except ImportError:
+        try:
+            from desires import MotivationType
+        except ImportError:
+            MotivationType = None
+
+    is_social_source = source in SOCIAL_SOURCES
+    is_social_type = (
+        MotivationType is not None
+        and mtype in (MotivationType.SOCIAL, MotivationType.WORLD_EVENT)
+    )
+    # LLM-желание поговорить с конкретным target_agent → не прерываем
+    has_target = bool((getattr(desire, 'context', {}) or {}).get('target_agent'))
+    is_llm_social = (source == 'llm_dynamic' and is_social_type and has_target)
+
+    interruptible = not (is_social_source or is_social_type or is_llm_social)
 
     return Intention(
         desire_id=desire.id,

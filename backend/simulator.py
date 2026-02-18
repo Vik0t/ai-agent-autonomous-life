@@ -42,6 +42,9 @@ class WorldSimulator:
         self._wait_tick_counters: Dict[str, int] = defaultdict(int)
         self.MAX_WAIT_TICKS = 4
 
+        # ── Трекер обработанных событий per-agent (чтобы не дублировать восприятие) ──
+        self._processed_event_ids: Dict[str, set] = defaultdict(set)
+
     # ── Вспомогательные ──────────────────────────────────────────────
 
     def _log_event(self, event_type: str, description: str,
@@ -143,7 +146,49 @@ class WorldSimulator:
     def _build_perceptions(self, agent: Agent) -> List[Dict]:
         perceptions = []
 
-        # Входящие сообщения из кеша (не из очереди!)
+        # ── Свежие события из event_log (не старше 10 секунд) ─────────
+        now = time.time()
+        seen_event_ids = set()
+        for event in reversed(self.event_log):
+            age = now - event.get("timestamp", 0)
+            if age > 10:
+                break  # список хронологический — дальше только старые
+            if event.get("type") not in ("user_event", "world_event"):
+                continue
+            targets = event.get("agent_ids", [])
+            if targets and agent.id not in targets:
+                continue
+            eid = event.get("id")
+            if eid in seen_event_ids:
+                continue
+            seen_event_ids.add(eid)
+
+            # Проверяем — уже обрабатывали этот ивент для этого агента?
+            already_processed = eid in self._processed_event_ids[agent.id]
+
+            perceptions.append(create_perception(
+                "world_event", "world",
+                {
+                    "description": event.get("description", ""),
+                    "event_type": event.get("type"),
+                    "event_id": eid,
+                },
+                confidence=1.0,
+                importance=0.85
+            ))
+
+            # ── Emotion: только один раз на событие per-agent ────────
+            if not already_processed:
+                event_desc = event.get("description", "")
+                agent.process_emotional_impact("world_event", content=event_desc)
+                self._processed_event_ids[agent.id].add(eid)
+                # Очищаем старые eid чтобы не накапливалось
+                if len(self._processed_event_ids[agent.id]) > 200:
+                    self._processed_event_ids[agent.id] = set(
+                        list(self._processed_event_ids[agent.id])[-100:]
+                    )
+
+        # ── Входящие сообщения из кеша тика ───────────────────────────
         for msg in self._tick_messages.get(agent.id, []):
             perceptions.append(create_perception(
                 "communication", msg.sender_id,
@@ -161,6 +206,9 @@ class WorldSimulator:
             print(f"📨 {agent.name} получил [{msg.message_type.value}] "
                   f"от {msg.sender_id}: {msg.content}")
             self._update_relationship(agent.id, msg.sender_id, 0.04)
+            # ── Emotion: входящее сообщение влияет на эмоции ─────────
+            affinity = self.relationships.get(tuple(sorted([agent.id, msg.sender_id])), 0.0)
+            agent.update_emotions_from_dialogue(affinity)
 
         # Наблюдение за другими агентами
         for other_id, other in self.agents.items():
@@ -227,14 +275,33 @@ class WorldSimulator:
         target_id = params.get("target")
         topic = params.get("topic", "general")
 
-        if not target_id or target_id not in self.agents:
+        if not target_id or (target_id not in self.agents and target_id != "user"):
             agent.confirm_action_execution(
                 command['intention_id'], command['step_object'], False, f"Unknown: {target_id}")
             return
 
         # ── Context Awareness: проверяем кулдаун цели и собственный соц. блок ──
         dg = agent.deliberation_cycle.desire_generator
-        
+
+        # ── GOD MODE: сообщения от/к user — обходим ВСЕ проверки ───────
+        if target_id == "user":
+            existing = self.communication_hub.get_active_conversation(agent.id, "user")
+            if existing:
+                from core.bdi.beliefs import create_self_belief
+                agent.beliefs.add_belief(
+                    create_self_belief(agent.id, "current_conversation", existing.id))
+                agent.confirm_action_execution(
+                    command['intention_id'], command['step_object'], True, f"Joined user: {existing.id}")
+            else:
+                conv = self.communication_hub.start_conversation(agent.id, "user", params.get("topic", "general"))
+                from core.bdi.beliefs import create_self_belief
+                agent.beliefs.add_belief(
+                    create_self_belief(agent.id, "current_conversation", conv.id))
+                print(f"👑 {agent.name} открывает диалог с User (GOD MODE)")
+                agent.confirm_action_execution(
+                    command['intention_id'], command['step_object'], True, f"GOD MODE: {conv.id}")
+            return
+
         # 1. Проверяем свой кулдаун на этого партнера
         if dg.is_on_cooldown(target_id):
             tname = self.agents[target_id].name
@@ -319,7 +386,8 @@ class WorldSimulator:
         in_reply_to = params.get("in_reply_to")
         incoming = params.get("incoming_content", "")
 
-        if not target_id or target_id not in self.agents:
+        # ── GOD MODE: "user" не является агентом, но всегда допустим ──
+        if not target_id or (target_id not in self.agents and target_id != "user"):
             agent.confirm_action_execution(
                 command['intention_id'], command['step_object'], False, f"Unknown: {target_id}")
             return
@@ -327,21 +395,25 @@ class WorldSimulator:
         # ── Context Awareness: проверяем что разговор ещё жив ──────────
         conv = self.communication_hub.get_active_conversation(agent.id, target_id)
         if not conv:
-            # Разговор уже завершён (собеседник вызвал end_conversation раньше нас).
-            # Не отправляем сообщения в пустоту — сразу завершаем шаг как «ненужный».
-            tname = self.agents[target_id].name
-            print(f"🚫 {agent.name}: разговор с {tname} уже закрыт — "
-                  f"пропускаем [{msg_type_str}] (не монологим)")
-            # Перематываем план к end_conversation чтобы подчистить намерение
-            for intention in agent.intentions:
-                if intention.id == command['intention_id'] and intention.plan:
-                    new_idx = intention.plan.skip_to_end_conversation(intention.current_step)
-                    intention.current_step = new_idx
-                    break
-            agent.confirm_action_execution(
-                command['intention_id'], command['step_object'], True,
-                f"Skipped [{msg_type_str}] — conversation already closed")
-            return
+            # GOD MODE: если цель — user, пробуем открыть/найти разговор
+            if target_id == "user":
+                conv = self.communication_hub.start_conversation(agent.id, "user", topic)
+                print(f"👑 {agent.name}: автоматически открываем диалог с User для ответа")
+            else:
+                # Разговор уже завершён (собеседник вызвал end_conversation раньше нас).
+                tname = self.agents[target_id].name
+                print(f"🚫 {agent.name}: разговор с {tname} уже закрыт — "
+                      f"пропускаем [{msg_type_str}] (не монологим)")
+                # Перематываем план к end_conversation чтобы подчистить намерение
+                for intention in agent.intentions:
+                    if intention.id == command['intention_id'] and intention.plan:
+                        new_idx = intention.plan.skip_to_end_conversation(intention.current_step)
+                        intention.current_step = new_idx
+                        break
+                agent.confirm_action_execution(
+                    command['intention_id'], command['step_object'], True,
+                    f"Skipped [{msg_type_str}] — conversation already closed")
+                return
 
         ctx_msgs = conv.get_context_for_agent(agent.id, max_messages=5)
 
@@ -368,7 +440,7 @@ class WorldSimulator:
         )
         await self.communication_hub.send_message(msg)
 
-        tname = self.agents[target_id].name
+        tname = self.agents[target_id].name if target_id in self.agents else target_id
         print(f"💬 {agent.name} → {tname} [{msg_type_str}]: {content}")
         self._log_event("message", f"{agent.name} → {tname}: {content}",
                         [agent.id, target_id],
@@ -376,77 +448,9 @@ class WorldSimulator:
                          "message_type": msg_type_str, "content": content,
                          "sender_name": agent.name, "receiver_name": tname})
         self._update_relationship(agent.id, target_id, 0.03)
-        agent.confirm_action_execution(
-            command['intention_id'], command['step_object'], True,
-            f"Sent [{msg_type_str}]: {content}")
-
-    async def _do_send(self, agent: Agent, params: Dict, command: Dict):
-        target_id = params.get("target")
-        msg_type_str = params.get("message_type", "statement")
-        topic = params.get("topic", "general")
-        requires_response = params.get("requires_response", False)
-        timeout = params.get("response_timeout", params.get("timeout", 30.0))
-        tone = params.get("tone", "friendly")
-        in_reply_to = params.get("in_reply_to")
-        incoming = params.get("incoming_content", "")
-
-        if not target_id or target_id not in self.agents:
-            agent.confirm_action_execution(
-                command['intention_id'], command['step_object'], False, f"Unknown: {target_id}")
-            return
-
-        # ── Context Awareness: проверяем что разговор ещё жив ──────────
-        conv = self.communication_hub.get_active_conversation(agent.id, target_id)
-        if not conv:
-            # Разговор уже завершён (собеседник вызвал end_conversation раньше нас).
-            # Не отправляем сообщения в пустоту — сразу завершаем шаг как «ненужный».
-            tname = self.agents[target_id].name
-            print(f"🚫 {agent.name}: разговор с {tname} уже закрыт — "
-                  f"пропускаем [{msg_type_str}] (не монологим)")
-            # Перематываем план к end_conversation чтобы подчистить намерение
-            for intention in agent.intentions:
-                if intention.id == command['intention_id'] and intention.plan:
-                    new_idx = intention.plan.skip_to_end_conversation(intention.current_step)
-                    intention.current_step = new_idx
-                    break
-            agent.confirm_action_execution(
-                command['intention_id'], command['step_object'], True,
-                f"Skipped [{msg_type_str}] — conversation already closed")
-            return
-
-        ctx_msgs = conv.get_context_for_agent(agent.id, max_messages=5)
-
-        content = self.llm_interface.generate_dialogue(
-            agent_name=agent.name,
-            personality=agent.personality.dict(),
-            context=f"Разговор о {topic}" if topic else "Разговор",
-            conversation_history=ctx_msgs,
-            message_type=msg_type_str,
-            incoming_message=incoming
-        )
-
-        type_map = {
-            "greeting": MessageType.GREETING, "question": MessageType.QUESTION,
-            "answer": MessageType.ANSWER, "statement": MessageType.STATEMENT,
-            "farewell": MessageType.FAREWELL,
-        }
-        msg = Message(
-            id=str(uuid.uuid4()), sender_id=agent.id, receiver_id=target_id,
-            content=content, message_type=type_map.get(msg_type_str, MessageType.STATEMENT),
-            conversation_id=conv.id, topic=topic,
-            requires_response=requires_response, response_timeout=timeout,
-            tone=tone, in_reply_to=in_reply_to
-        )
-        await self.communication_hub.send_message(msg)
-
-        tname = self.agents[target_id].name
-        print(f"💬 {agent.name} → {tname} [{msg_type_str}]: {content}")
-        self._log_event("message", f"{agent.name} → {tname}: {content}",
-                        [agent.id, target_id],
-                        {"message_id": msg.id, "conversation_id": conv.id,
-                         "message_type": msg_type_str, "content": content,
-                         "sender_name": agent.name, "receiver_name": tname})
-        self._update_relationship(agent.id, target_id, 0.03)
+        # ── Emotion: диалог влияет на эмоции ─────────────────────────
+        affinity = self.relationships.get(tuple(sorted([agent.id, target_id])), 0.0)
+        agent.update_emotions_from_dialogue(affinity)
         agent.confirm_action_execution(
             command['intention_id'], command['step_object'], True,
             f"Sent [{msg_type_str}]: {content}")

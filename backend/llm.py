@@ -10,25 +10,42 @@ load_dotenv()
 
 class LLMInterface:
     def __init__(self):
-        self.api_key = os.getenv("OPENROUTER_API_KEY")
-        if not self.api_key:
-            self.api_key = os.getenv("OPENAI_API_KEY")
+        # 1. Сначала проверяем Groq (приоритет по умолчанию)
+        self.groq_api_key = os.getenv("GROQ_API_KEY")
+        
+        # 2. Затем проверяем OpenRouter/OpenAI как запасной вариант
+        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+        if not self.openrouter_api_key:
+            self.openrouter_api_key = os.getenv("OPENAI_API_KEY")
 
-        if not self.api_key:
-            print("⚠️ WARNING: No API Key found in .env (expected OPENROUTER_API_KEY)")
-            self.client = None
-        else:
+        self.client = None
+        self._model = ""
+
+        # Логика инициализации клиента
+        if self.groq_api_key:
+            print("🚀 Initializing LLM via Groq...")
+            self.client = OpenAI(
+                base_url="https://api.groq.com/openai/v1",
+                api_key=self.groq_api_key
+            )
+            # Рекомендуемая модель для Groq (быстрая и мощная)
+            self._model = "llama-3.1-8b-instant"
+            
+        elif self.openrouter_api_key:
+            print("🌐 Initializing LLM via OpenRouter...")
             self.client = OpenAI(
                 base_url="https://openrouter.ai/api/v1",
-                api_key=self.api_key,
+                api_key=self.openrouter_api_key,
                 default_headers={
                     "HTTP-Referer": "http://localhost:8000",
                     "X-Title": "Cyber Hackathon Simulator",
                 }
             )
-
-        # Модель по умолчанию — быстрая и бесплатная
-        self._model = "openai/gpt-3.5-turbo"
+            # Модель по умолчанию для OpenRouter
+            self._model = "qwen/qwen3-next-80b-a3b-instruct:free"
+            
+        else:
+            print("⚠️ WARNING: No API Key found in .env (Expected GROQ_API_KEY or OPENROUTER_API_KEY)")
 
     # ──────────────────────────────────────────────────────────────────
     # Утилиты форматирования
@@ -57,9 +74,33 @@ class LLMInterface:
                 ],
                 max_tokens=max_tokens,
                 temperature=temperature,
+                # Отключаем thinking/reasoning режим для моделей которые его поддерживают
+                # (Qwen3, некоторые модели OpenRouter). Без этого content будет пустым,
+                # а ответ уйдёт в поле 'reasoning' которое содержит внутренние рассуждения.
+                extra_body={"thinking": {"type": "disabled"}},
             )
-            return response.choices[0].message.content.strip()
+            msg = response.choices[0].message
+            content = (msg.content or "").strip()
+            return content
         except Exception as e:
+            err = str(e)
+            # Если модель не поддерживает параметр thinking — повторяем без него
+            if "thinking" in err.lower() or "extra_body" in err.lower() or "unknown" in err.lower():
+                try:
+                    response = self.client.chat.completions.create(
+                        model=self._model,
+                        messages=[
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    msg = response.choices[0].message
+                    return (msg.content or "").strip()
+                except Exception as e2:
+                    print(f"🔴 LLM Error (retry): {e2}")
+                    return None
             print(f"🔴 LLM Error: {e}")
             return None
 
@@ -94,15 +135,6 @@ class LLMInterface:
     ) -> List[Dict]:
         """
         Генерирует список желаний агента на основе его состояния и окружения.
-
-        Если social_battery < 0.2 — LLM отдаёт приоритет SAFETY/CURIOSITY,
-        игнорируя SOCIAL мотивы.
-
-        Returns:
-            Список dict с ключами: description, priority, urgency,
-            motivation_type (SOCIAL/SAFETY/CURIOSITY/ACHIEVEMENT/ESTEEM),
-            source, context (dict).
-            При сбое LLM → пустой список (fallback обработает desires.py).
         """
         battery_note = ""
         if social_battery < 0.2:
@@ -196,14 +228,6 @@ class LLMInterface:
         conversation_history: List[Dict],
         social_battery: float
     ) -> str:
-        """
-        Анализирует текущий диалог и возвращает одно из трёх решений:
-          CONTINUE   — продолжить разговор
-          WRAP_UP    — начать прощаться (целевое поведение при усталости)
-          FORCE_QUIT — резко прервать (батарейка на нуле или агент обиделся)
-
-        Fallback при ошибке LLM → CONTINUE.
-        """
         if social_battery <= 0.0:
             print(f"⚡ [{agent_id}] Battery=0, FORCE_QUIT")
             return "FORCE_QUIT"
@@ -268,16 +292,6 @@ FORCE_QUIT — если нужно резко прервать (батарейк
         conversation_history: List[Dict],
         social_battery: float
     ) -> List[str]:
-        """
-        Генерирует 1–2 следующих логических шага для плана диалога.
-        Возвращает список ActionType строк (нижний регистр).
-
-        Допустимые значения:
-          send_message, wait_for_response, end_conversation,
-          initiate_conversation, respond_to_message, think
-
-        Fallback при ошибке → ["think"]
-        """
         VALID_ACTIONS = {
             "send_message", "wait_for_response", "end_conversation",
             "initiate_conversation", "respond_to_message", "think"
@@ -325,7 +339,7 @@ FORCE_QUIT — если нужно резко прервать (батарейк
         return ["think"]
 
     # ──────────────────────────────────────────────────────────────────
-    # Существующие методы (без изменений)
+    # Существующие методы
     # ──────────────────────────────────────────────────────────────────
 
     def generate_response(self, prompt: str, system_message: str = "") -> str:
@@ -407,7 +421,8 @@ Your response (in character, {agent_name}):"""
 
         try:
             response = self.client.chat.completions.create(
-                model="openai/gpt-3.5-turbo",
+                # ВАЖНО: используем self._model вместо хардкода openai/gpt-3.5-turbo
+                model=self._model,
                 messages=[
                     {"role": "system", "content": system_msg},
                     {"role": "user", "content": user_prompt}

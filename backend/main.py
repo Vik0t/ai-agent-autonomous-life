@@ -110,6 +110,9 @@ async def lifespan(app: FastAPI):
         agent = Agent(aid, name, avatar, personality, llm_interface=simulator.llm_interface)
         simulator.add_agent(agent)
 
+    # Регистрируем "user" как виртуального участника — агенты смогут с ним говорить
+    simulator.communication_hub.register_agent("user")
+
     asyncio.create_task(simulator.run_simulation())
     asyncio.create_task(broadcast_state())
     yield
@@ -144,26 +147,41 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_json(init_data)
         while True:
             data = await websocket.receive_json()
-            # Handle messages from frontend
             if data.get('type') == 'send_message':
-                # Send message to agent
+                receiver_id = data.get('receiver_id', '')
+                content = data.get('content', '')
+                topic = data.get('topic', 'user_input')
+                # Открываем диалог user ↔ agent ПЕРЕД отправкой сообщения,
+                # чтобы агент увидел "user" в active_partners и создал respond_desire
+                if receiver_id in simulator.agents:
+                    if not simulator.communication_hub.get_active_conversation("user", receiver_id):
+                        simulator.communication_hub.start_conversation("user", receiver_id, topic)
                 msg = Message(
-                    sender_id=data.get('sender_id', 'user'),
-                    receiver_id=data['receiver_id'],
-                    content=data['content'],
-                    topic=data.get('topic', 'user_input')
+                    sender_id="user",
+                    receiver_id=receiver_id,
+                    content=content,
+                    topic=topic,
+                    requires_response=True,
                 )
                 await simulator.communication_hub.send_message(msg)
                 simulator._log_event(
                     "user_message",
-                    f"Пользователь → {data['receiver_id']}: {data['content'][:60]}",
-                    [data['receiver_id']],
-                    {"content": data['content']}
+                    f"Пользователь → {receiver_id}: {content[:60]}",
+                    [receiver_id],
+                    {"content": content}
                 )
             elif data.get('type') == 'add_event':
-                # Add global event
                 event_desc = data.get('event_description', 'Global Event')
-                simulator._log_event("user_event", f"Событие: {event_desc}", list(simulator.agents.keys()))
+                agent_ids = list(simulator.agents.keys())
+                # Инжектируем напрямую в event_log с типом world_event —
+                # НЕ через Message-канал, чтобы perception был строго world_event
+                simulator._log_event(
+                    "world_event",
+                    f"Событие: {event_desc}",
+                    agent_ids,
+                    {"description": event_desc}
+                )
+                print(f"🌍 Событие «{event_desc}» добавлено в event_log для {len(agent_ids)} агентов")
     except WebSocketDisconnect:
         if websocket in active_connections:
             active_connections.remove(websocket)
@@ -279,18 +297,26 @@ async def get_relationships():
 @app.post("/api/messages")
 async def send_message(data: dict = Body(...)):
     """Отправить сообщение конкретному агенту (от пользователя)."""
+    receiver_id = data.get('receiver_id', '')
+    content = data.get('content', '')
+    topic = data.get('topic', 'external')
+    # Открываем диалог ПЕРЕД отправкой — иначе агент не увидит "user" в active_partners
+    if receiver_id in simulator.agents:
+        if not simulator.communication_hub.get_active_conversation("user", receiver_id):
+            simulator.communication_hub.start_conversation("user", receiver_id, topic)
     msg = Message(
         sender_id=data.get('sender_id', 'user'),
-        receiver_id=data['receiver_id'],
-        content=data['content'],
-        topic=data.get('topic', 'external')
+        receiver_id=receiver_id,
+        content=content,
+        topic=topic,
+        requires_response=True,
     )
     await simulator.communication_hub.send_message(msg)
     simulator._log_event(
         "user_message",
-        f"Пользователь → {data['receiver_id']}: {data['content'][:60]}",
-        [data['receiver_id']],
-        {"content": data['content']}
+        f"Пользователь → {receiver_id}: {content[:60]}",
+        [receiver_id],
+        {"content": content}
     )
     return {"status": "sent", "message_id": msg.id}
 
@@ -301,22 +327,15 @@ async def add_event(data: dict = Body(...)):
     desc = data.get("event_description", "Global Event")
     target_agent = data.get("agent_id")
 
-    # Рассылаем как системное сообщение всем или конкретному агенту
     if target_agent and target_agent in simulator.agents:
         targets = [target_agent]
     else:
         targets = list(simulator.agents.keys())
 
-    for aid in targets:
-        msg = Message(
-            sender_id="world",
-            receiver_id=aid,
-            content=f"[Событие] {desc}",
-            topic="world_event"
-        )
-        await simulator.communication_hub.send_message(msg)
-
+    # Инжектируем напрямую в event_log — строгий тип world_event
+    # НЕ через Message-канал (чтобы агент получил perception типа world_event, не communication)
     simulator._log_event("world_event", f"Событие: {desc}", targets, {"description": desc})
+    print(f"🌍 [REST] Событие «{desc}» → {len(targets)} агентов")
     return {"status": "ok", "event": desc, "notified_agents": targets}
 
 
