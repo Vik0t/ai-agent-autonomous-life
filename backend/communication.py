@@ -184,11 +184,26 @@ class Conversation:
             if self.status == ConversationStatus.WAITING:
                 self.status = ConversationStatus.ACTIVE
     
-    def get_context_for_agent(self, agent_id: str, max_messages: int = 5) -> List[Message]:
+    def get_context_for_agent(self, agent_id: str, max_messages: int = 5, db = None) -> List[Message]:
         """
-        Получить контекст диалога для агента (последние N сообщений)
+        Получить контекст диалога для агента ИЗ БД (последние N сообщений)
         """
-        return self.messages[-max_messages:] if self.messages else []
+        cursor = db.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM messages
+            WHERE sender_id = ? OR receiver_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (agent_id, agent_id, max_messages))
+        
+        # Преобразовать строки БД в Message объекты
+        messages = []
+        for row in cursor.fetchall():
+            msg = Message.from_db_row(dict(row))
+            messages.append(msg)
+        
+        # Вернуть в правильном порядке (старые → новые)
+        return list(reversed(messages))
     
     def is_timed_out(self) -> bool:
         """Проверить истёк ли timeout ожидания"""

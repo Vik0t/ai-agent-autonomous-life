@@ -424,7 +424,7 @@ class WorldSimulator:
                     f"Skipped [{msg_type_str}] — conversation already closed")
                 return
 
-        ctx_msgs = conv.get_context_for_agent(agent.id, max_messages=5)
+        ctx_msgs = conv.get_context_for_agent(agent.id, max_messages=5, db=self.db)
 
         content = self.llm_interface.generate_dialogue(
             agent_name=agent.name,

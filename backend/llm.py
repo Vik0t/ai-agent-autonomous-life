@@ -433,6 +433,7 @@ Your response (in character, {agent_name}):"""
             reply = response.choices[0].message.content.strip()
             reply = reply.replace(f"{agent_name}:", "").strip()
             reply = reply.strip('"\'')
+            print("History text:", history_text)
             return reply
         except Exception as e:
             print(f"🔴 LLM Error in generate_dialogue: {e}")
