@@ -26,7 +26,7 @@
 | Слой | Технологии |
 |---|---|
 | **Backend** | Python 3.11+, FastAPI, Uvicorn, Pydantic |
-| **AI/LLM** | OpenAI SDK (через Groq или OpenRouter), `llama-3.1-8b-instant` |
+| **AI/LLM** | OpenAI SDK (через Groq или OpenRouter) |
 | **Async** | asyncio, WebSocket (native FastAPI) |
 | **Frontend** | Vanilla JS, HTML5, CSS3 |
 | **Конфигурация** | python-dotenv |
@@ -37,33 +37,48 @@
 
 ```
 ai-agent-autonomous-life/
-├── main.py                  # FastAPI-приложение: REST API, WebSocket, lifespan
-├── agent.py                 # Класс Agent: личность, эмоции, BDI-интеграция
-├── simulator.py             # WorldSimulator: главный игровой цикл, тики
-├── communication.py         # CommunicationHub, Message, Conversation
-├── llm.py                   # LLMInterface: Groq/OpenRouter, генерация реплик
-├── memory.py                # (Расширенная память агентов)
+├── backend/                        # Серверная часть (Python/FastAPI)
+│   ├── core/
+│   │   └── bdi/                    # BDI-ядро: убеждения, желания, намерения, планы
+│   │       ├── __init__.py
+│   │       ├── beliefs.py
+│   │       ├── deliberation.py
+│   │       ├── desires.py
+│   │       ├── intentions.py
+│   │       └── plans.py
+│   ├── __init__.py
+│   ├── agent.py                    # Класс Agent: личность, эмоции, BDI-интеграция
+│   ├── communication.py            # CommunicationHub, Message, Conversation
+│   ├── llm.py                      # LLMInterface: Groq/OpenRouter, генерация реплик
+│   ├── main.py                     # FastAPI: REST API, WebSocket, lifespan
+│   ├── memory.py                   # Расширенная память агентов
+│   └── simulator.py                # WorldSimulator: игровой цикл, тики, события
 │
-├── beliefs.py               # Belief, BeliefBase — система убеждений
-├── desires.py               # Desire, DesireGenerator — генерация желаний
-├── intentions.py            # Intention, IntentionSelector — намерения
-├── plans.py                 # Plan, Planner, PlanStep, ActionType
-├── deliberation.py          # DeliberationCycle — главный BDI-цикл рассуждений
+├── docs/                           # Документация проекта
+├── presentation/                   # Материалы для презентации
 │
-├── index.html               # Точка входа веб-интерфейса
-├── main.js                  # Инициализация UI
-├── websocket-client.js      # WebSocket-клиент для стриминга состояния
-├── chat-interface.js        # Интерфейс чата с агентами
-├── chat-view.js             # Рендеринг сообщений
-├── agent-profile.js         # Карточка агента (эмоции, личность)
-├── agent-creator.js         # Форма создания нового агента
-├── group-chat.js            # Групповые разговоры
-├── relationship-visualizer.js # Граф отношений (D3-подобный)
-├── analytics.js             # Аналитика и статистика
-├── interaction-history.js   # История взаимодействий
-├── navigation.js            # Навигация по разделам
-├── components.js            # Переиспользуемые UI-компоненты
-└── styles.css               # Стили интерфейса
+├── static/                         # Фронтенд (Vanilla JS + HTML)
+│   ├── index.html                  # Точка входа веб-интерфейса
+│   ├── main.js                     # Инициализация UI
+│   ├── websocket-client.js         # WebSocket-клиент для стриминга состояния
+│   ├── chat-interface.js           # Интерфейс чата с агентами
+│   ├── chat-view.js                # Рендеринг сообщений
+│   ├── agent-profile.js            # Карточка агента (эмоции, личность)
+│   ├── agent-creator.js            # Форма создания нового агента
+│   ├── group-chat.js               # Групповые разговоры
+│   ├── relationship-visualizer.js  # Граф отношений
+│   ├── analytics.js                # Аналитика и статистика
+│   ├── interaction-history.js      # История взаимодействий
+│   ├── navigation.js               # Навигация по разделам
+│   ├── components.js               # Переиспользуемые UI-компоненты
+│   └── styles.css                  # Стили интерфейса
+│
+├── .gitignore
+├── .python-version                 # Версия Python (для pyenv/uv)
+├── pyproject.toml                  # Метаданные проекта и зависимости
+├── README.md
+├── requirements.txt                # Зависимости для pip
+└── uv.lock                         # Lockfile менеджера пакетов uv
 ```
 
 ---
