@@ -36,7 +36,7 @@
 ## 📁 Структура проекта
 
 ```
-cyber-bdi-simulator/
+ai-agent-autonomous-life/
 ├── main.py                  # FastAPI-приложение: REST API, WebSocket, lifespan
 ├── agent.py                 # Класс Agent: личность, эмоции, BDI-интеграция
 ├── simulator.py             # WorldSimulator: главный игровой цикл, тики
@@ -83,20 +83,20 @@ cyber-bdi-simulator/
 ```bash
 # 1. Клонировать репозиторий
 git clone https://github.com/your-org/cyber-bdi-simulator.git
-cd cyber-bdi-simulator
+cd ai-agent-autonomous-life
 
 # 2. Создать виртуальное окружение
 python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+source venv/bin/activate  
+# Windows: venv\Scripts\activate
 
 # 3. Установить зависимости
-pip install fastapi uvicorn pydantic openai python-dotenv
+pip install -r requirements.txt
 
-# 4. Создать файл конфигурации
-cp .env.example .env
-# Отредактировать .env — добавить API-ключ
+# 4. Отредактировать .env — добавить API-ключ
 
 # 5. Запустить сервер
+cd backend
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
@@ -104,72 +104,3 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 ---
 
-## 💡 Примеры использования
-
-### Получить состояние всех агентов
-
-```bash
-curl http://localhost:8000/api/agents
-```
-
-### Отправить сообщение агенту
-
-```bash
-curl -X POST http://localhost:8000/api/messages \
-  -H "Content-Type: application/json" \
-  -d '{
-    "receiver_id": "agent-0",
-    "content": "Как твои дела?",
-    "topic": "greeting"
-  }'
-```
-
-### Создать мировое событие
-
-```bash
-curl -X POST http://localhost:8000/api/events \
-  -H "Content-Type: application/json" \
-  -d '{
-    "event_description": "В городе объявлена тревога! Все укройтесь."
-  }'
-```
-
-### Создать нового агента
-
-```bash
-curl -X POST http://localhost:8000/api/agents \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Зора",
-    "avatar": "🦾",
-    "personality": {
-      "openness": 0.9,
-      "conscientiousness": 0.4,
-      "extraversion": 0.3,
-      "agreeableness": 0.7,
-      "neuroticism": 0.6
-    }
-  }'
-```
-
-### Подключиться к WebSocket для стриминга
-
-```javascript
-const ws = new WebSocket('ws://localhost:8000/ws');
-
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  if (data.type === 'state_update') {
-    console.log('Агенты:', data.agents);
-    console.log('Последние сообщения:', data.recent_messages);
-  }
-};
-
-// Отправить сообщение агенту
-ws.send(JSON.stringify({
-  type: 'send_message',
-  receiver_id: 'agent-0',
-  content: 'Привет!',
-  topic: 'user_input'
-}));
-```
