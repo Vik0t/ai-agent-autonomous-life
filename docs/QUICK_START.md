@@ -17,8 +17,8 @@ Groq даёт бесплатный лимит — этого достаточн�
 
 ```bash
 # Клонируем проект
-git clone https://github.com/your-org/cyber-bdi-simulator.git
-cd cyber-bdi-simulator
+git clone https://github.com/Vik0t/ai-agent-autonomous-life.git
+cd ai-agent-autonomous-life
 
 # Создаём виртуальное окружение (рекомендуется)
 python -m venv venv
